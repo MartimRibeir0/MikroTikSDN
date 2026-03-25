@@ -3,12 +3,9 @@ using MikroTikSDN.Models;
 
 namespace MikroTikSDN.Services;
 
-// ════════════════════════════════════════════════════════════════════
-//  INTERFACES
-// ════════════════════════════════════════════════════════════════════
-
 public class InterfaceService(MikroTikClient client)
 {
+    // ... existing getters ...
     public Task<List<MikrotikInterface>> GetAllAsync() =>
         client.GetListAsync<MikrotikInterface>("interface");
 
@@ -16,19 +13,14 @@ public class InterfaceService(MikroTikClient client)
         client.GetListAsync<MikrotikInterface>("interface/wireless");
 
     public Task EnableAsync(string id) =>
-        client.PostAsync("interface/enable", new Dictionary<string, object> { [".id"] = id });
+        client.PatchAsync($"interface/{id}", new { disabled = "false" });
 
     public Task DisableAsync(string id) =>
-        client.PostAsync("interface/disable", new Dictionary<string, object> { [".id"] = id });
+        client.PatchAsync($"interface/{id}", new { disabled = "true" });
 }
-
-// ════════════════════════════════════════════════════════════════════
-//  WIRELESS
-// ════════════════════════════════════════════════════════════════════
 
 public class WirelessService(MikroTikClient client)
 {
-    // Interfaces wireless
     public Task<List<WirelessInterface>> GetInterfacesAsync() =>
         client.GetListAsync<WirelessInterface>("interface/wireless");
 
@@ -39,17 +31,17 @@ public class WirelessService(MikroTikClient client)
         client.PatchAsync($"interface/wireless/{id}", changes);
 
     public Task EnableInterfaceAsync(string id) =>
-        client.PostAsync("interface/wireless/enable", new Dictionary<string, object> { [".id"] = id });
+        client.PatchAsync($"interface/wireless/{id}", new { disabled = "false" });
 
     public Task DisableInterfaceAsync(string id) =>
-        client.PostAsync("interface/wireless/disable", new Dictionary<string, object> { [".id"] = id });
+        client.PatchAsync($"interface/wireless/{id}", new { disabled = "true" });
 
-    // Perfis de segurança
     public Task<List<SecurityProfile>> GetSecurityProfilesAsync() =>
         client.GetListAsync<SecurityProfile>("interface/wireless/security-profiles");
 
+    // ALTERADO: PostAsync -> PutAsync
     public Task<SecurityProfile?> CreateSecurityProfileAsync(SecurityProfile profile) =>
-        client.PostAsync<SecurityProfile>("interface/wireless/security-profiles", profile);
+        client.PutAsync<SecurityProfile>("interface/wireless/security-profiles", profile);
 
     public Task UpdateSecurityProfileAsync(string id, object changes) =>
         client.PatchAsync($"interface/wireless/security-profiles/{id}", changes);
@@ -58,18 +50,14 @@ public class WirelessService(MikroTikClient client)
         client.DeleteAsync($"interface/wireless/security-profiles/{id}");
 }
 
-// ════════════════════════════════════════════════════════════════════
-//  BRIDGE
-// ════════════════════════════════════════════════════════════════════
-
 public class BridgeService(MikroTikClient client)
 {
-    // Bridge interfaces
     public Task<List<BridgeInterface>> GetBridgesAsync() =>
         client.GetListAsync<BridgeInterface>("interface/bridge");
 
+    // ALTERADO: PostAsync -> PutAsync
     public Task<BridgeInterface?> CreateBridgeAsync(BridgeInterface bridge) =>
-        client.PostAsync<BridgeInterface>("interface/bridge", bridge);
+        client.PutAsync<BridgeInterface>("interface/bridge", bridge);
 
     public Task UpdateBridgeAsync(string id, object changes) =>
         client.PatchAsync($"interface/bridge/{id}", changes);
@@ -77,16 +65,15 @@ public class BridgeService(MikroTikClient client)
     public Task DeleteBridgeAsync(string id) =>
         client.DeleteAsync($"interface/bridge/{id}");
 
-    // Bridge ports
     public Task<List<BridgePort>> GetPortsAsync() =>
         client.GetListAsync<BridgePort>("interface/bridge/port");
 
     public Task<List<BridgePort>> GetPortsByBridgeAsync(string bridgeName) =>
-        // Filtra localmente pois o RouterOS não suporta query params neste endpoint
         GetPortsAsync().ContinueWith(t => t.Result.Where(p => p.Bridge == bridgeName).ToList());
 
+    // ALTERADO: PostAsync -> PutAsync
     public Task<BridgePort?> AddPortAsync(BridgePort port) =>
-        client.PostAsync<BridgePort>("interface/bridge/port", port);
+        client.PutAsync<BridgePort>("interface/bridge/port", port);
 
     public Task UpdatePortAsync(string id, object changes) =>
         client.PatchAsync($"interface/bridge/port/{id}", changes);
@@ -95,17 +82,14 @@ public class BridgeService(MikroTikClient client)
         client.DeleteAsync($"interface/bridge/port/{id}");
 }
 
-// ════════════════════════════════════════════════════════════════════
-//  IP ADDRESSES
-// ════════════════════════════════════════════════════════════════════
-
 public class IpService(MikroTikClient client)
 {
     public Task<List<IpAddress>> GetAddressesAsync() =>
         client.GetListAsync<IpAddress>("ip/address");
 
+    // ALTERADO: PostAsync -> PutAsync
     public Task<IpAddress?> AddAddressAsync(IpAddress address) =>
-        client.PostAsync<IpAddress>("ip/address", address);
+        client.PutAsync<IpAddress>("ip/address", address);
 
     public Task UpdateAddressAsync(string id, object changes) =>
         client.PatchAsync($"ip/address/{id}", changes);
@@ -114,17 +98,14 @@ public class IpService(MikroTikClient client)
         client.DeleteAsync($"ip/address/{id}");
 }
 
-// ════════════════════════════════════════════════════════════════════
-//  ROTAS ESTÁTICAS
-// ════════════════════════════════════════════════════════════════════
-
 public class RoutingService(MikroTikClient client)
 {
     public Task<List<StaticRoute>> GetRoutesAsync() =>
         client.GetListAsync<StaticRoute>("ip/route");
 
+    // ALTERADO: PostAsync -> PutAsync
     public Task<StaticRoute?> AddRouteAsync(StaticRoute route) =>
-        client.PostAsync<StaticRoute>("ip/route", route);
+        client.PutAsync<StaticRoute>("ip/route", route);
 
     public Task UpdateRouteAsync(string id, object changes) =>
         client.PatchAsync($"ip/route/{id}", changes);
@@ -133,24 +114,20 @@ public class RoutingService(MikroTikClient client)
         client.DeleteAsync($"ip/route/{id}");
 
     public Task EnableRouteAsync(string id) =>
-        client.PostAsync("ip/route/enable", new Dictionary<string, object> { [".id"] = id });
+        client.PatchAsync($"ip/route/{id}", new { disabled = "false" });
 
     public Task DisableRouteAsync(string id) =>
-        client.PostAsync("ip/route/disable", new Dictionary<string, object> { [".id"] = id });
+        client.PatchAsync($"ip/route/{id}", new { disabled = "true" });
 }
-
-// ════════════════════════════════════════════════════════════════════
-//  DHCP
-// ════════════════════════════════════════════════════════════════════
 
 public class DhcpService(MikroTikClient client)
 {
-    // Servidores DHCP
     public Task<List<DhcpServer>> GetServersAsync() =>
         client.GetListAsync<DhcpServer>("ip/dhcp-server");
 
+    // ALTERADO: PostAsync -> PutAsync
     public Task<DhcpServer?> CreateServerAsync(DhcpServer server) =>
-        client.PostAsync<DhcpServer>("ip/dhcp-server", server);
+        client.PutAsync<DhcpServer>("ip/dhcp-server", server);
 
     public Task UpdateServerAsync(string id, object changes) =>
         client.PatchAsync($"ip/dhcp-server/{id}", changes);
@@ -159,27 +136,27 @@ public class DhcpService(MikroTikClient client)
         client.DeleteAsync($"ip/dhcp-server/{id}");
 
     public Task EnableServerAsync(string id) =>
-        client.PostAsync("ip/dhcp-server/enable", new Dictionary<string, object> { [".id"] = id });
+        client.PatchAsync($"ip/dhcp-server/{id}", new { disabled = "false" });
 
     public Task DisableServerAsync(string id) =>
-        client.PostAsync("ip/dhcp-server/disable", new Dictionary<string, object> { [".id"] = id });
+        client.PatchAsync($"ip/dhcp-server/{id}", new { disabled = "true" });
 
-    // Pools de endereços
     public Task<List<DhcpPool>> GetPoolsAsync() =>
         client.GetListAsync<DhcpPool>("ip/pool");
 
+    // ALTERADO: PostAsync -> PutAsync
     public Task<DhcpPool?> CreatePoolAsync(DhcpPool pool) =>
-        client.PostAsync<DhcpPool>("ip/pool", pool);
+        client.PutAsync<DhcpPool>("ip/pool", pool);
 
     public Task DeletePoolAsync(string id) =>
         client.DeleteAsync($"ip/pool/{id}");
 
-    // Redes DHCP
     public Task<List<DhcpNetwork>> GetNetworksAsync() =>
         client.GetListAsync<DhcpNetwork>("ip/dhcp-server/network");
 
+    // ALTERADO: PostAsync -> PutAsync
     public Task<DhcpNetwork?> CreateNetworkAsync(DhcpNetwork network) =>
-        client.PostAsync<DhcpNetwork>("ip/dhcp-server/network", network);
+        client.PutAsync<DhcpNetwork>("ip/dhcp-server/network", network);
 
     public Task UpdateNetworkAsync(string id, object changes) =>
         client.PatchAsync($"ip/dhcp-server/network/{id}", changes);
@@ -188,34 +165,34 @@ public class DhcpService(MikroTikClient client)
         client.DeleteAsync($"ip/dhcp-server/network/{id}");
 }
 
-// ════════════════════════════════════════════════════════════════════
-//  DNS
-// ════════════════════════════════════════════════════════════════════
-
 public class DnsService(MikroTikClient client)
 {
     public Task<DnsSettings?> GetSettingsAsync() =>
         client.GetSingleAsync<DnsSettings>("ip/dns");
 
-    public Task UpdateSettingsAsync(object changes) =>
-        client.PostAsync("ip/dns/set", changes);
+    public Task UpdateSettingsAsync(string servers, bool allowRemote) =>
+        client.PatchAsync("ip/dns", new Dictionary<string, object>
+        {
+            ["servers"] = servers,
+            ["allow-remote-requests"] = allowRemote ? "yes" : "no"
+        });
 
-    public Task FlushCacheAsync() =>
-        client.PostAsync("ip/dns/cache/flush", new { });
+    // MANTIDO: PostAsync é correto aqui porque é um comando (flush)
+    public async Task FlushCacheAsync()
+    {
+        try { await client.PostAsync("ip/dns/cache/flush", new { }); }
+        catch { /* ignorar se ROS não suportar via REST */ }
+    }
 }
-
-// ════════════════════════════════════════════════════════════════════
-//  WIREGUARD (2ª Parte)
-// ════════════════════════════════════════════════════════════════════
 
 public class WireGuardService(MikroTikClient client)
 {
-    // Interfaces WireGuard
     public Task<List<WireGuardInterface>> GetInterfacesAsync() =>
         client.GetListAsync<WireGuardInterface>("interface/wireguard");
 
+    // ALTERADO: PostAsync -> PutAsync
     public Task<WireGuardInterface?> CreateInterfaceAsync(WireGuardInterface wg) =>
-        client.PostAsync<WireGuardInterface>("interface/wireguard", wg);
+        client.PutAsync<WireGuardInterface>("interface/wireguard", wg);
 
     public Task UpdateInterfaceAsync(string id, object changes) =>
         client.PatchAsync($"interface/wireguard/{id}", changes);
@@ -223,12 +200,12 @@ public class WireGuardService(MikroTikClient client)
     public Task DeleteInterfaceAsync(string id) =>
         client.DeleteAsync($"interface/wireguard/{id}");
 
-    // Peers
     public Task<List<WireGuardPeer>> GetPeersAsync() =>
         client.GetListAsync<WireGuardPeer>("interface/wireguard/peers");
 
+    // ALTERADO: PostAsync -> PutAsync
     public Task<WireGuardPeer?> AddPeerAsync(WireGuardPeer peer) =>
-        client.PostAsync<WireGuardPeer>("interface/wireguard/peers", peer);
+        client.PutAsync<WireGuardPeer>("interface/wireguard/peers", peer);
 
     public Task UpdatePeerAsync(string id, object changes) =>
         client.PatchAsync($"interface/wireguard/peers/{id}", changes);
@@ -236,10 +213,6 @@ public class WireGuardService(MikroTikClient client)
     public Task DeletePeerAsync(string id) =>
         client.DeleteAsync($"interface/wireguard/peers/{id}");
 
-    /// <summary>
-    /// Gera um ficheiro de configuração WireGuard para um cliente
-    /// (Windows/Linux/Android/iOS) com base nos dados do peer e da interface servidor.
-    /// </summary>
     public static string GenerateClientConfig(WireGuardPeer peer, string serverPublicKey,
         string serverEndpoint, string serverPort, string clientPrivateKey,
         string clientAddress, string dns = "1.1.1.1")

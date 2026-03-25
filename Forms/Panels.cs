@@ -576,55 +576,161 @@ public class RouteEditForm : Form
 public class DhcpPanel : BasePanel
 {
     private readonly DhcpService _svc;
+    private readonly TabControl _innerTabs = new();
+    private readonly DataGridView _gridPools = new();
+    private readonly Button _btnEnable;
+    private readonly Button _btnDisable;
 
     public DhcpPanel(MikroTikClient client) : base(client)
     {
         _svc = new DhcpService(client);
-        AddToolbarButton("＋ Novo Servidor", Color.FromArgb(0,120,215)).Click += BtnAdd_Click;
-        AddToolbarButton("✕ Apagar",         Color.FromArgb(180,30,30)).Click += async (_, _) => await DeleteAsync();
-        AddToolbarButton("✔ Ativar",         Color.FromArgb(0,140,80)).Click  += async (_, _) => await ToggleAsync(true);
-        AddToolbarButton("✕ Desativar",      Color.FromArgb(100,60,60)).Click += async (_, _) => await ToggleAsync(false);
-        AddToolbarButton("↺ Atualizar",      Color.FromArgb(0,100,180)).Click += async (_, _) => await LoadDataAsync();
+        
+        // 1. Configurar Tabs (Servidores | Pools)
+        Controls.Remove(Grid); // Remove a grid padrão para usar sistema de tabs
+        _innerTabs.Dock = DockStyle.Fill;
+        
+        // Tab Servidores
+        var tabServers = new TabPage("Servidores DHCP");
+        Grid.Dock = DockStyle.Fill;
+        tabServers.Controls.Add(Grid);
 
+        // Tab Pools
+        var tabPools = new TabPage("IP Pools");
+        StyleGrid(_gridPools); // Aplica o mesmo estilo visual
+        _gridPools.Dock = DockStyle.Fill;
+        tabPools.Controls.Add(_gridPools);
+
+        _innerTabs.TabPages.AddRange(new[] { tabServers, tabPools });
+        _innerTabs.SelectedIndexChanged += async (_, _) => await UpdateToolbarAndLoad();
+        Controls.Add(_innerTabs);
+
+        // 2. Toolbar
+        AddToolbarButton("＋ Novo Servidor", Color.FromArgb(0, 120, 215)).Click += BtnAddServer_Click;
+        AddToolbarButton("＋ Nova Pool",     Color.FromArgb(0, 140, 80)).Click  += BtnAddPool_Click;
+        AddToolbarButton("✕ Apagar",         Color.FromArgb(180, 30, 30)).Click += async (_, _) => await DeleteAsync();
+        
+        // Botões que só fazem sentido para Servidores (guardamos referência para esconder na tab Pools)
+        _btnEnable  = AddToolbarButton("✔ Ativar", Color.FromArgb(0, 140, 80));
+        _btnDisable = AddToolbarButton("✕ Desativar", Color.FromArgb(100, 60, 60));
+        
+        _btnEnable.Click  += async (_, _) => await ToggleAsync(true);
+        _btnDisable.Click += async (_, _) => await ToggleAsync(false);
+        
+        AddToolbarButton("↺ Atualizar", Color.FromArgb(0, 100, 180)).Click += async (_, _) => await LoadDataAsync();
+
+        // 3. Colunas Grid Servidores
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name=".id",          HeaderText="ID",         Visible=false });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name="name",         HeaderText="Nome",       FillWeight=25 });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name="interface",    HeaderText="Interface",  FillWeight=25 });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name="address-pool", HeaderText="Pool",       FillWeight=20 });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name="lease-time",   HeaderText="Lease Time", FillWeight=15 });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name="disabled",     HeaderText="Disabled",   FillWeight=15 });
+
+        // 4. Colunas Grid Pools
+        _gridPools.Columns.Add(new DataGridViewTextBoxColumn { Name=".id",    HeaderText="ID",      Visible=false });
+        _gridPools.Columns.Add(new DataGridViewTextBoxColumn { Name="name",   HeaderText="Nome",    FillWeight=30 });
+        _gridPools.Columns.Add(new DataGridViewTextBoxColumn { Name="ranges", HeaderText="Ranges",  FillWeight=70 });
+    }
+
+    private static void StyleGrid(DataGridView g)
+    {
+        g.ReadOnly = true; g.AllowUserToAddRows = false; g.AllowUserToDeleteRows = false;
+        g.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        g.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        g.BackgroundColor = Color.White; g.RowHeadersVisible = false;
+        g.BorderStyle = BorderStyle.None; g.EnableHeadersVisualStyles = false;
+        g.ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
+        {
+            BackColor = Color.FromArgb(40, 40, 40), ForeColor = Color.White,
+            Font = new Font("Segoe UI", 9f, FontStyle.Bold)
+        };
+    }
+
+    private async Task UpdateToolbarAndLoad()
+    {
+        // Esconde botões de ativar/desativar se estiver na aba Pools
+        bool isServer = _innerTabs.SelectedIndex == 0;
+        _btnEnable.Visible = isServer;
+        _btnDisable.Visible = isServer;
+        await LoadDataAsync();
     }
 
     protected override async Task LoadDataAsync()
     {
         try
         {
-            var list = await _svc.GetServersAsync();
-            Grid.Rows.Clear();
-            foreach (var d in list)
-                Grid.Rows.Add(d.Id, d.Name, d.Interface, d.AddressPool, d.LeaseTime, d.Disabled ? "Sim" : "Não");
+            if (_innerTabs.SelectedIndex == 0) // Servidores
+            {
+                var list = await _svc.GetServersAsync();
+                Grid.Rows.Clear();
+                foreach (var d in list)
+                    Grid.Rows.Add(d.Id, d.Name, d.Interface, d.AddressPool, d.LeaseTime, d.Disabled ? "Sim" : "Não");
+            }
+            else // Pools
+            {
+                var list = await _svc.GetPoolsAsync();
+                _gridPools.Rows.Clear();
+                foreach (var p in list)
+                    _gridPools.Rows.Add(p.Id, p.Name, p.Ranges);
+            }
         }
         catch (Exception ex) { ShowError(ex); }
     }
 
-    private async void BtnAdd_Click(object? s, EventArgs e)
+    private async void BtnAddServer_Click(object? s, EventArgs e)
     {
-        using var frm = new DhcpServerEditForm();
+        try 
+        {
+            var pools = await _svc.GetPoolsAsync();
+            if (pools.Count == 0 && MessageBox.Show("Não existem Pools.\nDeseja criar uma Pool primeiro?", "Aviso", MessageBoxButtons.YesNo) == DialogResult.Yes)
+            {
+                _innerTabs.SelectedIndex = 1; // Muda para a aba de Pools
+                return;
+            }
+
+            using var frm = new DhcpServerEditForm(pools);
+            if (frm.ShowDialog() != DialogResult.OK) return;
+            await _svc.CreateServerAsync(frm.Server); 
+            await LoadDataAsync(); 
+        }
+        catch (Exception ex) { ShowError(ex); }
+    }
+
+    private async void BtnAddPool_Click(object? s, EventArgs e)
+    {
+        using var frm = new DhcpPoolEditForm();
         if (frm.ShowDialog() != DialogResult.OK) return;
-        try { await _svc.CreateServerAsync(frm.Server); await LoadDataAsync(); }
+        try { await _svc.CreatePoolAsync(frm.Pool); await LoadDataAsync(); if(_innerTabs.SelectedIndex != 1) _innerTabs.SelectedIndex = 1; }
         catch (Exception ex) { ShowError(ex); }
     }
 
     private async Task DeleteAsync()
     {
-        var id = SelectedId(); if (id == null) { MessageBox.Show("Seleciona um servidor DHCP."); return; }
-        if (MessageBox.Show("Apagar este servidor DHCP?", "Confirmar", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
-        try { await _svc.DeleteServerAsync(id); await LoadDataAsync(); }
-        catch (Exception ex) { ShowError(ex); }
+        if (_innerTabs.SelectedIndex == 0) // Apagar Servidor
+        {
+            var id = SelectedId(); 
+            if (id == null) { MessageBox.Show("Seleciona um servidor."); return; }
+            if (MessageBox.Show("Apagar servidor DHCP?", "Confirmar", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+            { 
+                try { await _svc.DeleteServerAsync(id); await LoadDataAsync(); } catch (Exception ex) { ShowError(ex); } 
+            }
+        }
+        else // Apagar Pool
+        {
+            var id = SelectedId(); 
+            if (id == null) { MessageBox.Show("Seleciona uma Pool."); return; }
+            
+            if (MessageBox.Show("Apagar esta Pool?\nSe estiver em uso, dará erro.", "Confirmar", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+            {
+                try { await _svc.DeletePoolAsync(id); await LoadDataAsync(); } catch (Exception ex) { ShowError(ex); }
+            }
+        }
     }
 
     private async Task ToggleAsync(bool enable)
     {
-        var id = SelectedId(); if (id == null) { MessageBox.Show("Seleciona um servidor DHCP."); return; }
+        if (_innerTabs.SelectedIndex != 0) return;
+        var id = SelectedId(); if (id == null) { MessageBox.Show("Seleciona um servidor."); return; }
         try {
             if (enable) await _svc.EnableServerAsync(id); else await _svc.DisableServerAsync(id);
             await LoadDataAsync();
@@ -632,39 +738,108 @@ public class DhcpPanel : BasePanel
     }
 }
 
+// SUBSTITUA A CLASSE DhcpServerEditForm INTEIRA POR ESTA:
 public class DhcpServerEditForm : Form
 {
     public DhcpServer Server { get; private set; } = new();
-    private readonly TextBox _txtName=new(), _txtInterface=new(), _txtPool=new(), _txtLease=new();
+    private readonly TextBox _txtName = new();
+    private readonly TextBox _txtInterface = new();
+    
+    // Agora usa ComboBox em vez de TextBox
+    private readonly ComboBox _cboPool = new() { DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly TextBox _txtLease = new();
 
-    public DhcpServerEditForm()
+    // Construtor aceita a lista de Pools
+    public DhcpServerEditForm(List<DhcpPool> pools)
     {
-        Text="Novo Servidor DHCP"; Size=new Size(340,230);
-        FormBorderStyle=FormBorderStyle.FixedDialog; MaximizeBox=false;
-        StartPosition=FormStartPosition.CenterParent; Font=new Font("Segoe UI",9.5f);
+        Text = "Novo Servidor DHCP"; 
+        Size = new Size(340, 230);
+        FormBorderStyle = FormBorderStyle.FixedDialog; 
+        MaximizeBox = false;
+        StartPosition = FormStartPosition.CenterParent; 
+        Font = new Font("Segoe UI", 9.5f);
         _txtLease.Text = "10m";
 
-        int y=18;
-        void Row(string lbl, TextBox tb) {
-            Controls.Add(new Label { Text=lbl, Location=new Point(14,y+3), AutoSize=true });
-            tb.Location=new Point(120,y); tb.Width=185; Controls.Add(tb); y+=38;
+        // Preencher a ComboBox
+        foreach (var p in pools) 
+            _cboPool.Items.Add(p.Name);
+        
+        if (_cboPool.Items.Count > 0) _cboPool.SelectedIndex = 0;
+
+        int y = 18;
+        void Row(string lbl, Control ctrl) {
+            Controls.Add(new Label { Text = lbl, Location = new Point(14, y + 3), AutoSize = true });
+            ctrl.Location = new Point(120, y); 
+            ctrl.Width = 185; 
+            Controls.Add(ctrl); 
+            y += 38;
         }
+
         Row("Nome:", _txtName);
         Row("Interface:", _txtInterface);
-        Row("Pool:", _txtPool);
+        Row("Pool:", _cboPool);
         Row("Lease Time:", _txtLease);
 
-        var ok=new Button { Text="Guardar", Location=new Point(120,y+5), Size=new Size(85,28),
-            BackColor=Color.FromArgb(0,120,215), ForeColor=Color.White, FlatStyle=FlatStyle.Flat };
-        ok.FlatAppearance.BorderSize=0;
-        ok.Click+=(_, _) => {
-            if (string.IsNullOrWhiteSpace(_txtName.Text)||string.IsNullOrWhiteSpace(_txtInterface.Text))
-            { MessageBox.Show("Nome e Interface são obrigatórios."); return; }
-            Server=new DhcpServer { Name=_txtName.Text.Trim(), Interface=_txtInterface.Text.Trim(),
-                AddressPool=_txtPool.Text.Trim(), LeaseTime=_txtLease.Text.Trim() };
-            DialogResult=DialogResult.OK; Close();
+        var ok = new Button { Text = "Guardar", Location = new Point(120, y + 5), Size = new Size(85, 28),
+            BackColor = Color.FromArgb(0, 120, 215), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+        ok.FlatAppearance.BorderSize = 0;
+        
+        ok.Click += (_, _) => {
+            if (string.IsNullOrWhiteSpace(_txtName.Text) || string.IsNullOrWhiteSpace(_txtInterface.Text) || string.IsNullOrWhiteSpace(_cboPool.Text))
+            { 
+                MessageBox.Show("Nome, Interface e Pool são obrigatórios."); 
+                return; 
+            }
+            
+            Server = new DhcpServer { 
+                Name = _txtName.Text.Trim(), 
+                Interface = _txtInterface.Text.Trim(),
+                AddressPool = _cboPool.Text, 
+                LeaseTime = _txtLease.Text.Trim() 
+            };
+            DialogResult = DialogResult.OK; 
+            Close();
         };
-        Controls.Add(ok); AcceptButton=ok;
+        Controls.Add(ok); 
+        AcceptButton = ok;
+    }
+}
+
+public class DhcpPoolEditForm : Form
+{
+    public DhcpPool Pool { get; private set; } = new();
+    private readonly TextBox _txtName = new();
+    private readonly TextBox _txtRanges = new();
+
+    public DhcpPoolEditForm()
+    {
+        Text = "Nova Pool de IPs"; Size = new Size(340, 200);
+        FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false;
+        StartPosition = FormStartPosition.CenterParent; Font = new Font("Segoe UI", 9.5f);
+
+        int y = 18;
+        void Row(string lbl, TextBox tb) {
+            Controls.Add(new Label { Text = lbl, Location = new Point(14, y + 3), AutoSize = true });
+            tb.Location = new Point(120, y); tb.Width = 185; Controls.Add(tb); y += 38;
+        }
+        Row("Nome:", _txtName);     // ex: pool-lan
+        Row("Ranges:", _txtRanges); // ex: 192.168.1.10-192.168.1.50
+
+        // Dica
+        Controls.Add(new Label { 
+            Text = "Ex: 192.168.88.10-192.168.88.254", 
+            Location = new Point(120, y - 5), 
+            AutoSize = true, ForeColor = Color.Gray, Font = new Font("Segoe UI", 8f) 
+        });
+
+        var ok = new Button { Text = "Guardar", Location = new Point(120, y + 20), Size = new Size(85, 28), BackColor=Color.FromArgb(0,120,215), ForeColor=Color.White, FlatStyle=FlatStyle.Flat };
+        ok.FlatAppearance.BorderSize = 0;
+        ok.Click += (_, _) => {
+            if (string.IsNullOrWhiteSpace(_txtName.Text) || string.IsNullOrWhiteSpace(_txtRanges.Text)) { MessageBox.Show("Obrigatório."); return; }
+            Pool = new DhcpPool { Name = _txtName.Text.Trim(), Ranges = _txtRanges.Text.Trim() };
+            DialogResult = DialogResult.OK; Close();
+        };
+        Controls.Add(ok); AcceptButton = ok;
     }
 }
 
@@ -730,11 +905,7 @@ public class DnsPanel : BasePanel
     {
         try
         {
-            await Client.PostAsync("ip/dns/set", new Dictionary<string, object>
-            {
-                ["servers"] = _txtServers.Text.Trim(),
-                ["allow-remote-requests"] = _chkAllow.Checked ? "yes" : "no"
-            });
+            await _svc.UpdateSettingsAsync(_txtServers.Text.Trim(), _chkAllow.Checked);
             MessageBox.Show("Definições DNS guardadas.", "Sucesso", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex) { ShowError(ex); }
@@ -1010,5 +1181,57 @@ public class WgClientConfigForm : Form
             if (dlg.ShowDialog()==DialogResult.OK) File.WriteAllText(dlg.FileName, txtOutput.Text);
         };
         Controls.Add(btnSave);
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  POOLS PANEL
+// ════════════════════════════════════════════════════════════════════
+
+public class PoolsPanel : BasePanel
+{
+    private readonly DhcpService _svc;
+
+    public PoolsPanel(MikroTikClient client) : base(client)
+    {
+        _svc = new DhcpService(client);
+        AddToolbarButton("＋ Nova Pool", Color.FromArgb(0, 120, 215)).Click += BtnAdd_Click;
+        AddToolbarButton("✕ Apagar",     Color.FromArgb(180, 30, 30)).Click += async (_, _) => await DeleteAsync();
+        AddToolbarButton("↺ Atualizar",  Color.FromArgb(0, 100, 180)).Click += async (_, _) => await LoadDataAsync();
+
+        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id",    HeaderText = "ID",      Visible = false });
+        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "name",   HeaderText = "Nome",    FillWeight = 30 });
+        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "ranges", HeaderText = "Ranges",  FillWeight = 70 });
+    }
+
+    protected override async Task LoadDataAsync()
+    {
+        try
+        {
+            var list = await _svc.GetPoolsAsync();
+            Grid.Rows.Clear();
+            foreach (var p in list)
+                Grid.Rows.Add(p.Id, p.Name, p.Ranges);
+        }
+        catch (Exception ex) { ShowError(ex); }
+    }
+
+    private async void BtnAdd_Click(object? s, EventArgs e)
+    {
+        using var frm = new DhcpPoolEditForm();
+        if (frm.ShowDialog() != DialogResult.OK) return;
+        try { await _svc.CreatePoolAsync(frm.Pool); await LoadDataAsync(); }
+        catch (Exception ex) { ShowError(ex); }
+    }
+
+    private async Task DeleteAsync()
+    {
+        var id = SelectedId(); 
+        if (id == null) { MessageBox.Show("Seleciona uma Pool."); return; }
+        
+        if (MessageBox.Show("Apagar esta Pool?\nSe estiver em uso, dará erro.", "Confirmar", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+        
+        try { await _svc.DeletePoolAsync(id); await LoadDataAsync(); }
+        catch (Exception ex) { ShowError(ex); }
     }
 }

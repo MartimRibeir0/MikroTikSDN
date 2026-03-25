@@ -1,9 +1,11 @@
+using System.Net.Http.Headers;
+using System.Text;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using Newtonsoft.Json.Serialization;
+
 namespace MikroTikSDN.Api;
 
-/// <summary>
-/// Cliente HTTP para comunicar com a API REST do RouterOS MikroTik.
-/// Documentação: https://help.mikrotik.com/docs/display/ROS/REST+API
-/// </summary>
 public class MikroTikClient : IDisposable
 {
     private readonly HttpClient _http;
@@ -22,7 +24,6 @@ public class MikroTikClient : IDisposable
         string scheme = useHttps ? "https" : "http";
         _baseUrl = $"{scheme}://{host}:{actualPort}/rest";
 
-        // MikroTik usa certificados self-signed → ignorar validação SSL
         var handler = new HttpClientHandler
         {
             ServerCertificateCustomValidationCallback = (_, _, _, _) => true
@@ -34,8 +35,6 @@ public class MikroTikClient : IDisposable
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", creds);
         _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     }
-
-    // ─── GET ────────────────────────────────────────────────────────────────
 
     public async Task<List<T>> GetListAsync<T>(string endpoint)
     {
@@ -56,43 +55,56 @@ public class MikroTikClient : IDisposable
         return await resp.Content.ReadAsStringAsync();
     }
 
-    // ─── POST ───────────────────────────────────────────────────────────────
-
     public async Task<T?> PostAsync<T>(string endpoint, object body)
     {
-        var resp = await _http.PostAsync($"{_baseUrl}/{endpoint}", ToJson(body));
-        await EnsureSuccessAsync(resp);
+        var content = ToJson(body);
+        var sentBody = await content.ReadAsStringAsync();
+        var resp = await _http.PostAsync($"{_baseUrl}/{endpoint}", content);
+        await EnsureSuccessAsync(resp, sentBody);
         var json = await resp.Content.ReadAsStringAsync();
         return JsonConvert.DeserializeObject<T>(json);
     }
 
     public async Task PostAsync(string endpoint, object body)
     {
-        var resp = await _http.PostAsync($"{_baseUrl}/{endpoint}", ToJson(body));
-        await EnsureSuccessAsync(resp);
+        var content = ToJson(body);
+        var sentBody = await content.ReadAsStringAsync();
+        var resp = await _http.PostAsync($"{_baseUrl}/{endpoint}", content);
+        await EnsureSuccessAsync(resp, sentBody);
     }
-
-    // ─── PATCH (atualização parcial) ─────────────────────────────────────────
 
     public async Task<T?> PatchAsync<T>(string endpoint, object body)
     {
+        var content = ToJson(body);
+        var sentBody = await content.ReadAsStringAsync();
         var req = new HttpRequestMessage(new HttpMethod("PATCH"), $"{_baseUrl}/{endpoint}")
-            { Content = ToJson(body) };
+            { Content = content };
         var resp = await _http.SendAsync(req);
-        await EnsureSuccessAsync(resp);
+        await EnsureSuccessAsync(resp, sentBody);
         var json = await resp.Content.ReadAsStringAsync();
         return JsonConvert.DeserializeObject<T>(json);
     }
 
     public async Task PatchAsync(string endpoint, object body)
     {
+        var content = ToJson(body);
+        var sentBody = await content.ReadAsStringAsync();
         var req = new HttpRequestMessage(new HttpMethod("PATCH"), $"{_baseUrl}/{endpoint}")
-            { Content = ToJson(body) };
+            { Content = content };
         var resp = await _http.SendAsync(req);
-        await EnsureSuccessAsync(resp);
+        await EnsureSuccessAsync(resp, sentBody);
     }
 
-    // ─── PUT (substituição completa) ─────────────────────────────────────────
+    // ADICIONAR ESTE MÉTODO: Suporte para PUT com retorno (para Criação/Add)
+    public async Task<T?> PutAsync<T>(string endpoint, object body)
+    {
+        var content = ToJson(body);
+        var sentBody = await content.ReadAsStringAsync();
+        var resp = await _http.PutAsync($"{_baseUrl}/{endpoint}", content);
+        await EnsureSuccessAsync(resp, sentBody);
+        var json = await resp.Content.ReadAsStringAsync();
+        return JsonConvert.DeserializeObject<T>(json);
+    }
 
     public async Task PutAsync(string endpoint, object body)
     {
@@ -100,17 +112,12 @@ public class MikroTikClient : IDisposable
         await EnsureSuccessAsync(resp);
     }
 
-    // ─── DELETE ─────────────────────────────────────────────────────────────
-
     public async Task DeleteAsync(string endpoint)
     {
         var resp = await _http.DeleteAsync($"{_baseUrl}/{endpoint}");
         await EnsureSuccessAsync(resp);
     }
 
-    // ─── Utilitários ────────────────────────────────────────────────────────
-
-    /// <summary>Testa a ligação ao dispositivo.</summary>
     public async Task<(bool ok, string identity)> TestConnectionAsync()
     {
         try
@@ -125,22 +132,67 @@ public class MikroTikClient : IDisposable
         }
     }
 
-    private static StringContent ToJson(object obj) =>
-        new(JsonConvert.SerializeObject(obj, new JsonSerializerSettings
+    // Serializa para JSON ignorando:
+    // - campos null
+    // - campos com valor default (false, 0)
+    // - campos com string vazia "" (como .id quando é novo objeto)
+    private static StringContent ToJson(object obj)
+    {
+        var settings = new JsonSerializerSettings
         {
-            NullValueHandling = NullValueHandling.Ignore
-        }), Encoding.UTF8, "application/json");
+            NullValueHandling = NullValueHandling.Ignore,
+            DefaultValueHandling = DefaultValueHandling.Ignore,
+            ContractResolver = new SkipEmptyStringsResolver()
+        };
+        return new StringContent(
+            JsonConvert.SerializeObject(obj, settings),
+            Encoding.UTF8, "application/json");
+    }
 
-    private static async Task EnsureSuccessAsync(HttpResponseMessage resp)
+    private static async Task EnsureSuccessAsync(HttpResponseMessage resp, string sentBody = "")
     {
         if (!resp.IsSuccessStatusCode)
         {
             var body = await resp.Content.ReadAsStringAsync();
-            throw new MikroTikApiException((int)resp.StatusCode, body);
+            var url  = resp.RequestMessage?.RequestUri?.ToString() ?? "URL desconhecida";
+            var method = resp.RequestMessage?.Method.ToString() ?? "";
+            throw new MikroTikApiException((int)resp.StatusCode,
+                $"\nMétodo: {method}\nURL: {url}\nEnviado: {sentBody}\nResposta: {body}");
         }
     }
 
     public void Dispose() => _http.Dispose();
+}
+
+/// <summary>
+/// ContractResolver que remove do JSON qualquer propriedade
+/// cujo valor seja uma string vazia — o RouterOS rejeita campos como ".id":""
+/// </summary>
+public class SkipEmptyStringsResolver : DefaultContractResolver
+{
+    protected override JsonProperty CreateProperty(
+        System.Reflection.MemberInfo member,
+        MemberSerialization memberSerialization)
+    {
+        var prop = base.CreateProperty(member, memberSerialization);
+
+        if (prop.PropertyType == typeof(string))
+        {
+            var originalShouldSerialize = prop.ShouldSerialize;
+            prop.ShouldSerialize = instance =>
+            {
+                // Executa o filtro original (ex: JsonIgnore) primeiro
+                if (originalShouldSerialize != null && !originalShouldSerialize(instance))
+                    return false;
+
+                // Não serializa strings vazias
+                var val = prop.ValueProvider?.GetValue(instance) as string;
+                return !string.IsNullOrEmpty(val);
+            };
+        }
+
+        return prop;
+    }
 }
 
 public class MikroTikApiException(int statusCode, string body)

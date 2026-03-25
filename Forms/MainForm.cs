@@ -24,6 +24,7 @@ public partial class MainForm : Form
     private TabPage _tabIp        = new();
     private TabPage _tabRoutes    = new();
     private TabPage _tabDhcp      = new();
+    private TabPage _tabPools     = new();  // <--- NOVO
     private TabPage _tabDns       = new();
     private TabPage _tabWireGuard = new();
 
@@ -37,7 +38,16 @@ public partial class MainForm : Form
 
         BuildUI();
         DeviceManager.Load();
+        // Carregar lista SEM disparar LoadCurrentTab — o evento Shown trata disso
+        _cboDevices.SelectedIndexChanged -= CboDevices_Changed;
         RefreshDeviceList();
+        _cboDevices.SelectedIndexChanged += CboDevices_Changed;
+
+        Shown += (_, _) =>
+        {
+            if (_cboDevices.SelectedIndex >= 0)
+                CboDevices_Changed(null, EventArgs.Empty);
+        };
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -115,13 +125,14 @@ public partial class MainForm : Form
         _tabBridge     = CreateTab("🔗 Bridge");
         _tabIp         = CreateTab("🌐 Endereços IP");
         _tabRoutes     = CreateTab("🗺 Rotas");
-        _tabDhcp       = CreateTab("📋 DHCP");
+        _tabDhcp       = CreateTab("📋 DHCP Server"); // Mudei o nome para ficar mais claro
+        _tabPools      = CreateTab("💧 IP Pools");    // <--- NOVO: Entre DHCP e DNS
         _tabDns        = CreateTab("🔍 DNS");
         _tabWireGuard  = CreateTab("🔒 WireGuard VPN");
 
         _tabs.TabPages.AddRange(new[]
             { _tabInterfaces, _tabWireless, _tabBridge,
-              _tabIp, _tabRoutes, _tabDhcp, _tabDns, _tabWireGuard });
+              _tabIp, _tabRoutes, _tabDhcp, _tabPools, _tabDns, _tabWireGuard }); // <--- Adicione _tabPools aqui
     }
 
     private static TabPage CreateTab(string title)
@@ -186,11 +197,14 @@ public partial class MainForm : Form
     private void BtnRemove_Click(object? s, EventArgs e)
     {
         if (_selectedDevice == null) return;
-        if (MessageBox.Show($"Remover '{_selectedDevice.Name}'?", "Confirmar",
-            MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+        var result = MessageBox.Show(this,
+            $"Tem certeza que deseja remover o dispositivo '{_selectedDevice.Name}'?",
+            "Confirmar remoção", MessageBoxButtons.YesNo,
+            MessageBoxIcon.Question);
+
+        if (result == DialogResult.Yes)
         {
             DeviceManager.RemoveDevice(_cboDevices.SelectedIndex);
-            _selectedDevice = null;
             RefreshDeviceList();
         }
     }
@@ -199,53 +213,60 @@ public partial class MainForm : Form
     {
         if (_selectedDevice == null) { ShowStatus("Sem dispositivo selecionado", false); return; }
         _btnTestConn.Enabled = false;
+        
         ShowStatus("A testar ligação...", null);
+        
+        // CORREÇÃO: Usar o método existente TestConnectionAsync
         var client = DeviceManager.GetClient(_selectedDevice);
         var (ok, info) = await client.TestConnectionAsync();
+        
         ShowStatus(ok ? $"✔ Ligado — {info}" : $"✘ Falhou: {info}", ok);
         _btnTestConn.Enabled = true;
     }
 
+    // Certifique-se que tem este método auxiliar também
     private void ShowStatus(string msg, bool? success)
     {
         _lblStatus.Text = msg;
         _lblStatus.ForeColor = success switch
         {
-            true  => Color.LightGreen,
+            true => Color.LightGreen,
             false => Color.Salmon,
-            null  => Color.LightGray
+            _ => Color.LightGray
         };
     }
-
-    // ════════════════════════════════════════════════════════════════
-    //  Carregamento dinâmico de tabs
-    // ════════════════════════════════════════════════════════════════
-
-    private void Tabs_Changed(object? s, EventArgs e) => LoadCurrentTab();
 
     private void LoadCurrentTab()
     {
         if (_selectedDevice == null) return;
-        var client = DeviceManager.GetClient(_selectedDevice);
         var tab = _tabs.SelectedTab;
-
-        // Fix: Ensure tab is not null before dereferencing
         if (tab == null) return;
+
+        var client = DeviceManager.GetClient(_selectedDevice);
 
         // Limpa o conteúdo anterior e carrega o painel adequado
         tab.Controls.Clear();
+        
+        Control panel = null;
 
-        Control panel = tab == _tabInterfaces ? new InterfacesPanel(client)
-            : tab == _tabWireless  ? new WirelessPanel(client)
-            : tab == _tabBridge    ? new BridgePanel(client)
-            : tab == _tabIp        ? new IpPanel(client)
-            : tab == _tabRoutes    ? new RoutesPanel(client)
-            : tab == _tabDhcp      ? new DhcpPanel(client)
-            : tab == _tabDns       ? new DnsPanel(client)
-            : tab == _tabWireGuard ? new WireGuardPanel(client)
-            : new Label { Text = "Tab desconhecida", Dock = DockStyle.Fill };
+        if (tab == _tabInterfaces)   panel = new InterfacesPanel(client);
+        else if (tab == _tabWireless) panel = new WirelessPanel(client);
+        else if (tab == _tabBridge)   panel = new BridgePanel(client);
+        else if (tab == _tabIp)       panel = new IpPanel(client);
+        else if (tab == _tabRoutes)   panel = new RoutesPanel(client);
+        else if (tab == _tabDhcp)     panel = new DhcpPanel(client);
+        else if (tab == _tabPools)    panel = new PoolsPanel(client); // <--- NOVO
+        else if (tab == _tabDns)      panel = new DnsPanel(client);
+        else if (tab == _tabWireGuard) panel = new WireGuardPanel(client);
+        else panel = new Label { Text = "Tab desconhecida", Dock = DockStyle.Fill };
 
         panel.Dock = DockStyle.Fill;
         tab.Controls.Add(panel);
+    }
+
+    private void Tabs_Changed(object? s, EventArgs e)
+    {
+        if (_tabs.SelectedTab != null)
+            LoadCurrentTab();
     }
 }
