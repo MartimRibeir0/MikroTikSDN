@@ -19,14 +19,15 @@ public partial class MainForm : Form
 
     // ── Tabs (cada uma é um painel de funcionalidades)
     private TabPage _tabInterfaces = new();
-    private TabPage _tabWireless  = new();
-    private TabPage _tabBridge    = new();
-    private TabPage _tabIp        = new();
-    private TabPage _tabRoutes    = new();
-    private TabPage _tabDhcp      = new();
-    private TabPage _tabPools     = new();  // <--- NOVO
-    private TabPage _tabDns       = new();
+    private TabPage _tabWireless = new();
+    private TabPage _tabBridge = new();
+    private TabPage _tabIp = new();
+    private TabPage _tabRoutes = new();
+    private TabPage _tabDhcp = new();
+    private TabPage _tabPools = new();
+    private TabPage _tabDns = new();
     private TabPage _tabWireGuard = new();
+    private TabPage _tabSystem = new();
 
     public MainForm()
     {
@@ -67,8 +68,10 @@ public partial class MainForm : Form
 
         var lblDevice = new Label
         {
-            Text = "Dispositivo:", ForeColor = Color.White,
-            AutoSize = true, Location = new Point(10, 15)
+            Text = "Dispositivo:",
+            ForeColor = Color.White,
+            AutoSize = true,
+            Location = new Point(10, 15)
         };
 
         _cboDevices.Location = new Point(90, 11);
@@ -76,20 +79,20 @@ public partial class MainForm : Form
         _cboDevices.DropDownStyle = ComboBoxStyle.DropDownList;
         _cboDevices.SelectedIndexChanged += CboDevices_Changed;
 
-        StyleButton(_btnAddDevice,    "＋ Adicionar", 320, 9,  Color.FromArgb(0, 120, 215));
-        StyleButton(_btnEditDevice,   "✎ Editar",    425, 9,  Color.FromArgb(80, 80, 80));
-        StyleButton(_btnRemoveDevice, "✕ Remover",   510, 9,  Color.FromArgb(180, 30, 30));
-        StyleButton(_btnTestConn,     "⚡ Testar",   600, 9,  Color.FromArgb(0, 150, 100));
+        StyleButton(_btnAddDevice, "＋ Adicionar", 320, 9, Color.FromArgb(0, 120, 215));
+        StyleButton(_btnEditDevice, "✎ Editar", 425, 9, Color.FromArgb(80, 80, 80));
+        StyleButton(_btnRemoveDevice, "✕ Remover", 510, 9, Color.FromArgb(180, 30, 30));
+        StyleButton(_btnTestConn, "⚡ Testar", 600, 9, Color.FromArgb(0, 150, 100));
 
         _lblStatus.AutoSize = true;
         _lblStatus.ForeColor = Color.LightGray;
         _lblStatus.Location = new Point(700, 15);
         _lblStatus.Text = "Nenhum dispositivo selecionado";
 
-        _btnAddDevice.Click    += BtnAdd_Click;
-        _btnEditDevice.Click   += BtnEdit_Click;
+        _btnAddDevice.Click += BtnAdd_Click;
+        _btnEditDevice.Click += BtnEdit_Click;
         _btnRemoveDevice.Click += BtnRemove_Click;
-        _btnTestConn.Click     += BtnTest_Click;
+        _btnTestConn.Click += BtnTest_Click;
 
         topPanel.Controls.AddRange(new Control[]
             { lblDevice, _cboDevices, _btnAddDevice, _btnEditDevice,
@@ -121,18 +124,19 @@ public partial class MainForm : Form
     private void BuildTabs()
     {
         _tabInterfaces = CreateTab("🔌 Interfaces");
-        _tabWireless   = CreateTab("📶 Wireless");
-        _tabBridge     = CreateTab("🔗 Bridge");
-        _tabIp         = CreateTab("🌐 Endereços IP");
-        _tabRoutes     = CreateTab("🗺 Rotas");
-        _tabDhcp       = CreateTab("📋 DHCP Server"); // Mudei o nome para ficar mais claro
-        _tabPools      = CreateTab("💧 IP Pools");    // <--- NOVO: Entre DHCP e DNS
-        _tabDns        = CreateTab("🔍 DNS");
-        _tabWireGuard  = CreateTab("🔒 WireGuard VPN");
+        _tabWireless = CreateTab("📶 Wireless");
+        _tabBridge = CreateTab("🔗 Bridge");
+        _tabIp = CreateTab("🌐 Endereços IP");
+        _tabRoutes = CreateTab("🗺 Rotas");
+        _tabDhcp = CreateTab("📋 DHCP Server");
+        _tabPools = CreateTab("💧 IP Pools");
+        _tabDns = CreateTab("🔍 DNS");
+        _tabWireGuard = CreateTab("🔒 WireGuard VPN");
+        _tabSystem = CreateTab("⚙ Sistema");
 
         _tabs.TabPages.AddRange(new[]
             { _tabInterfaces, _tabWireless, _tabBridge,
-              _tabIp, _tabRoutes, _tabDhcp, _tabPools, _tabDns, _tabWireGuard }); // <--- Adicione _tabPools aqui
+              _tabIp, _tabRoutes, _tabDhcp, _tabPools, _tabDns, _tabWireGuard, _tabSystem });
     }
 
     private static TabPage CreateTab(string title)
@@ -213,18 +217,16 @@ public partial class MainForm : Form
     {
         if (_selectedDevice == null) { ShowStatus("Sem dispositivo selecionado", false); return; }
         _btnTestConn.Enabled = false;
-        
+
         ShowStatus("A testar ligação...", null);
-        
-        // CORREÇÃO: Usar o método existente TestConnectionAsync
+
         var client = DeviceManager.GetClient(_selectedDevice);
         var (ok, info) = await client.TestConnectionAsync();
-        
+
         ShowStatus(ok ? $"✔ Ligado — {info}" : $"✘ Falhou: {info}", ok);
         _btnTestConn.Enabled = true;
     }
 
-    // Certifique-se que tem este método auxiliar também
     private void ShowStatus(string msg, bool? success)
     {
         _lblStatus.Text = msg;
@@ -246,18 +248,19 @@ public partial class MainForm : Form
 
         // Limpa o conteúdo anterior e carrega o painel adequado
         tab.Controls.Clear();
-        
+
         Control panel = null;
 
-        if (tab == _tabInterfaces)   panel = new InterfacesPanel(client);
+        if (tab == _tabInterfaces) panel = new InterfacesPanel(client);
         else if (tab == _tabWireless) panel = new WirelessPanel(client);
-        else if (tab == _tabBridge)   panel = new BridgePanel(client);
-        else if (tab == _tabIp)       panel = new IpPanel(client);
-        else if (tab == _tabRoutes)   panel = new RoutesPanel(client);
-        else if (tab == _tabDhcp)     panel = new DhcpPanel(client);
-        else if (tab == _tabPools)    panel = new PoolsPanel(client); // <--- NOVO
-        else if (tab == _tabDns)      panel = new DnsPanel(client);
+        else if (tab == _tabBridge) panel = new BridgePanel(client);
+        else if (tab == _tabIp) panel = new IpPanel(client);
+        else if (tab == _tabRoutes) panel = new RoutesPanel(client);
+        else if (tab == _tabDhcp) panel = new DhcpPanel(client);
+        else if (tab == _tabPools) panel = new PoolsPanel(client);
+        else if (tab == _tabDns) panel = new DnsPanel(client);
         else if (tab == _tabWireGuard) panel = new WireGuardPanel(client);
+        else if (tab == _tabSystem) panel = new SystemPanel(client);
         else panel = new Label { Text = "Tab desconhecida", Dock = DockStyle.Fill };
 
         panel.Dock = DockStyle.Fill;

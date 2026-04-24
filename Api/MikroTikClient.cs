@@ -55,6 +55,14 @@ public class MikroTikClient : IDisposable
         return await resp.Content.ReadAsStringAsync();
     }
 
+    public async Task PostAsync(string endpoint, object body)
+    {
+        var content = ToJson(body);
+        var sentBody = await content.ReadAsStringAsync();
+        var resp = await _http.PostAsync($"{_baseUrl}/{endpoint}", content);
+        await EnsureSuccessAsync(resp, sentBody);
+    }
+
     public async Task<T?> PostAsync<T>(string endpoint, object body)
     {
         var content = ToJson(body);
@@ -65,37 +73,16 @@ public class MikroTikClient : IDisposable
         return JsonConvert.DeserializeObject<T>(json);
     }
 
-    public async Task PostAsync(string endpoint, object body)
-    {
-        var content = ToJson(body);
-        var sentBody = await content.ReadAsStringAsync();
-        var resp = await _http.PostAsync($"{_baseUrl}/{endpoint}", content);
-        await EnsureSuccessAsync(resp, sentBody);
-    }
-
-    public async Task<T?> PatchAsync<T>(string endpoint, object body)
-    {
-        var content = ToJson(body);
-        var sentBody = await content.ReadAsStringAsync();
-        var req = new HttpRequestMessage(new HttpMethod("PATCH"), $"{_baseUrl}/{endpoint}")
-            { Content = content };
-        var resp = await _http.SendAsync(req);
-        await EnsureSuccessAsync(resp, sentBody);
-        var json = await resp.Content.ReadAsStringAsync();
-        return JsonConvert.DeserializeObject<T>(json);
-    }
-
     public async Task PatchAsync(string endpoint, object body)
     {
         var content = ToJson(body);
         var sentBody = await content.ReadAsStringAsync();
         var req = new HttpRequestMessage(new HttpMethod("PATCH"), $"{_baseUrl}/{endpoint}")
-            { Content = content };
+        { Content = content };
         var resp = await _http.SendAsync(req);
         await EnsureSuccessAsync(resp, sentBody);
     }
 
-    // ADICIONAR ESTE MÉTODO: Suporte para PUT com retorno (para Criação/Add)
     public async Task<T?> PutAsync<T>(string endpoint, object body)
     {
         var content = ToJson(body);
@@ -106,16 +93,16 @@ public class MikroTikClient : IDisposable
         return JsonConvert.DeserializeObject<T>(json);
     }
 
-    public async Task PutAsync(string endpoint, object body)
-    {
-        var resp = await _http.PutAsync($"{_baseUrl}/{endpoint}", ToJson(body));
-        await EnsureSuccessAsync(resp);
-    }
-
     public async Task DeleteAsync(string endpoint)
     {
         var resp = await _http.DeleteAsync($"{_baseUrl}/{endpoint}");
         await EnsureSuccessAsync(resp);
+    }
+
+    // ADICIONADO: Método para reiniciar o dispositivo
+    public async Task RebootAsync()
+    {
+        await PostAsync("system/reboot", new { });
     }
 
     public async Task<(bool ok, string identity)> TestConnectionAsync()
@@ -132,10 +119,6 @@ public class MikroTikClient : IDisposable
         }
     }
 
-    // Serializa para JSON ignorando:
-    // - campos null
-    // - campos com valor default (false, 0)
-    // - campos com string vazia "" (como .id quando é novo objeto)
     private static StringContent ToJson(object obj)
     {
         var settings = new JsonSerializerSettings
@@ -154,7 +137,7 @@ public class MikroTikClient : IDisposable
         if (!resp.IsSuccessStatusCode)
         {
             var body = await resp.Content.ReadAsStringAsync();
-            var url  = resp.RequestMessage?.RequestUri?.ToString() ?? "URL desconhecida";
+            var url = resp.RequestMessage?.RequestUri?.ToString() ?? "URL desconhecida";
             var method = resp.RequestMessage?.Method.ToString() ?? "";
             throw new MikroTikApiException((int)resp.StatusCode,
                 $"\nMétodo: {method}\nURL: {url}\nEnviado: {sentBody}\nResposta: {body}");
@@ -164,33 +147,21 @@ public class MikroTikClient : IDisposable
     public void Dispose() => _http.Dispose();
 }
 
-/// <summary>
-/// ContractResolver que remove do JSON qualquer propriedade
-/// cujo valor seja uma string vazia — o RouterOS rejeita campos como ".id":""
-/// </summary>
 public class SkipEmptyStringsResolver : DefaultContractResolver
 {
-    protected override JsonProperty CreateProperty(
-        System.Reflection.MemberInfo member,
-        MemberSerialization memberSerialization)
+    protected override JsonProperty CreateProperty(System.Reflection.MemberInfo member, MemberSerialization memberSerialization)
     {
         var prop = base.CreateProperty(member, memberSerialization);
-
         if (prop.PropertyType == typeof(string))
         {
             var originalShouldSerialize = prop.ShouldSerialize;
             prop.ShouldSerialize = instance =>
             {
-                // Executa o filtro original (ex: JsonIgnore) primeiro
-                if (originalShouldSerialize != null && !originalShouldSerialize(instance))
-                    return false;
-
-                // Não serializa strings vazias
+                if (originalShouldSerialize != null && !originalShouldSerialize(instance)) return false;
                 var val = prop.ValueProvider?.GetValue(instance) as string;
                 return !string.IsNullOrEmpty(val);
             };
         }
-
         return prop;
     }
 }
