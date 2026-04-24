@@ -2,7 +2,8 @@ using MikroTikSDN.Api;
 using MikroTikSDN.Models;
 using MikroTikSDN.Services;
 using System.Security.Cryptography;
-using Chaos.NaCl; // Requer o pacote NuGet Chaos.NaCl.Standard
+using Chaos.NaCl;
+using Newtonsoft.Json;
 
 namespace MikroTikSDN.Forms;
 
@@ -21,6 +22,47 @@ public static class WireGuardKeyGen
         byte[] pubKey = MontgomeryCurve25519.GetPublicKey(privKey);
 
         return (Convert.ToBase64String(privKey), Convert.ToBase64String(pubKey));
+    }
+}
+
+// ── Cofre Local para guardar Chaves Privadas ────────────────────────
+public static class WireGuardKeyStore
+{
+    private const string FilePath = "wg_keys.json";
+    private static Dictionary<string, string> _keys = new();
+
+    static WireGuardKeyStore()
+    {
+        Load();
+    }
+
+    public static void Load()
+    {
+        if (File.Exists(FilePath))
+        {
+            try
+            {
+                var json = File.ReadAllText(FilePath);
+                _keys = JsonConvert.DeserializeObject<Dictionary<string, string>>(json) ?? new();
+            }
+            catch { }
+        }
+    }
+
+    public static void Save(string publicKey, string privateKey)
+    {
+        if (string.IsNullOrWhiteSpace(publicKey) || string.IsNullOrWhiteSpace(privateKey)) return;
+        _keys[publicKey] = privateKey;
+        try
+        {
+            File.WriteAllText(FilePath, JsonConvert.SerializeObject(_keys, Formatting.Indented));
+        }
+        catch { }
+    }
+
+    public static string? GetPrivateKey(string publicKey)
+    {
+        return _keys.TryGetValue(publicKey, out var priv) ? priv : null;
     }
 }
 // ──────────────────────────────────────────────────────────────────
@@ -109,8 +151,10 @@ public abstract class BasePanel : UserControl
         return btn;
     }
 
-    protected void ShowError(Exception ex) =>
+    protected void ShowError(Exception ex)
+    {
         MessageBox.Show(ex.Message, "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error);
+    }
 
     protected string? SelectedId()
     {
@@ -127,19 +171,14 @@ public abstract class BasePanel : UserControl
 public class InterfacesPanel : BasePanel
 {
     private readonly InterfaceService _svc;
-    private List<MikrotikInterface> _all = new();
-    private readonly CheckBox _chkWirelessOnly = new() { Text = "Apenas Wireless", AutoSize = true, Margin = new Padding(0, 8, 10, 0) };
 
     public InterfacesPanel(MikroTikClient client) : base(client)
     {
         _svc = new InterfaceService(client);
 
-        Toolbar.Controls.Add(_chkWirelessOnly);
         AddToolbarButton("✔ Ativar", Color.FromArgb(0, 140, 80)).Click += async (_, _) => await ToggleAsync(true);
         AddToolbarButton("✕ Desativar", Color.FromArgb(160, 40, 40)).Click += async (_, _) => await ToggleAsync(false);
         AddToolbarButton("↺ Atualizar", Color.FromArgb(0, 100, 180)).Click += async (_, _) => await LoadDataAsync();
-
-        _chkWirelessOnly.CheckedChanged += (_, _) => ApplyFilter();
 
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", HeaderText = "ID", Visible = false });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "name", HeaderText = "Nome", FillWeight = 25 });
@@ -152,27 +191,40 @@ public class InterfacesPanel : BasePanel
 
     protected override async Task LoadDataAsync()
     {
-        try { _all = await _svc.GetAllAsync(); ApplyFilter(); }
-        catch (Exception ex) { ShowError(ex); }
-    }
-
-    private void ApplyFilter()
-    {
-        Grid.Rows.Clear();
-        var list = _chkWirelessOnly.Checked
-            ? _all.Where(i => i.Type.Contains("wireless", StringComparison.OrdinalIgnoreCase)).ToList()
-            : _all;
-
-        foreach (var i in list)
-            Grid.Rows.Add(i.Id, i.Name, i.Type, i.MacAddress, i.Mtu, i.Running ? "✔" : "✘", i.Disabled ? "Sim" : "Não");
+        try
+        {
+            var list = await _svc.GetAllAsync();
+            Grid.Rows.Clear();
+            foreach (var i in list)
+            {
+                Grid.Rows.Add(i.Id, i.Name, i.Type, i.MacAddress, i.Mtu, i.Running ? "✔" : "✘", i.Disabled ? "Sim" : "Não");
+            }
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+        }
     }
 
     private async Task ToggleAsync(bool enable)
     {
         var id = SelectedId();
-        if (id == null) { MessageBox.Show("Seleciona uma interface."); return; }
-        try { if (enable) await _svc.EnableAsync(id); else await _svc.DisableAsync(id); await LoadDataAsync(); }
-        catch (Exception ex) { ShowError(ex); }
+        if (id == null)
+        {
+            MessageBox.Show("Seleciona uma interface.");
+            return;
+        }
+
+        try
+        {
+            if (enable) await _svc.EnableAsync(id);
+            else await _svc.DisableAsync(id);
+            await LoadDataAsync();
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+        }
     }
 }
 
@@ -183,31 +235,22 @@ public class InterfacesPanel : BasePanel
 public class WirelessPanel : BasePanel
 {
     private readonly WirelessService _svc;
-    private List<WirelessInterface> _list = new();
-    private readonly TabControl _innerTabs = new();
-    private readonly DataGridView _gridProfiles = new();
 
     public WirelessPanel(MikroTikClient client) : base(client)
     {
         _svc = new WirelessService(client);
-        Controls.Remove(Grid);
 
-        _innerTabs.Dock = DockStyle.Fill;
-        var tabIf = new TabPage("Interfaces Wireless");
-        Grid.Dock = DockStyle.Fill;
-        tabIf.Controls.Add(Grid);
+        AddToolbarButton("✎ Editar / Configurar", Color.FromArgb(80, 80, 80)).Click += BtnEdit_Click;
+        AddToolbarButton("✔ Ativar", Color.FromArgb(0, 140, 80)).Click += async (_, _) => await ToggleAsync(true);
+        AddToolbarButton("✕ Desativar", Color.FromArgb(160, 40, 40)).Click += async (_, _) => await ToggleAsync(false);
 
-        var tabProf = new TabPage("Perfis de Segurança");
-        StyleGrid(_gridProfiles);
-        _gridProfiles.Dock = DockStyle.Fill;
-        tabProf.Controls.Add(_gridProfiles);
+        AddToolbarButton("🛡️ Gerir Perfis de Segurança", Color.DarkMagenta).Click += async (_, _) =>
+        {
+            using var frm = new SecurityProfilesForm(_svc);
+            frm.ShowDialog();
+            await LoadDataAsync();
+        };
 
-        _innerTabs.TabPages.AddRange(new[] { tabIf, tabProf });
-        _innerTabs.SelectedIndexChanged += async (_, _) => await LoadDataAsync();
-        Controls.Add(_innerTabs);
-
-        AddToolbarButton("✔ Ativar", Color.FromArgb(0, 140, 80)).Click += async (_, _) => await ToggleIfAsync(true);
-        AddToolbarButton("✕ Desativar", Color.FromArgb(160, 40, 40)).Click += async (_, _) => await ToggleIfAsync(false);
         AddToolbarButton("↺ Atualizar", Color.FromArgb(0, 100, 180)).Click += async (_, _) => await LoadDataAsync();
 
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", HeaderText = "ID", Visible = false });
@@ -215,56 +258,472 @@ public class WirelessPanel : BasePanel
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "ssid", HeaderText = "SSID", FillWeight = 20 });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "disabled", HeaderText = "Disabled", FillWeight = 10 });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "sec", HeaderText = "Segurança", FillWeight = 20 });
-
-        _gridProfiles.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", HeaderText = "ID", Visible = false });
-        _gridProfiles.Columns.Add(new DataGridViewTextBoxColumn { Name = "name", HeaderText = "Nome", FillWeight = 25 });
-        _gridProfiles.Columns.Add(new DataGridViewTextBoxColumn { Name = "mode", HeaderText = "Modo", FillWeight = 25 });
-        _gridProfiles.Columns.Add(new DataGridViewTextBoxColumn { Name = "auth", HeaderText = "Auth", FillWeight = 25 });
-    }
-
-    private static void StyleGrid(DataGridView g)
-    {
-        g.ReadOnly = true; g.AllowUserToAddRows = false; g.AllowUserToDeleteRows = false;
-        g.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-        g.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-        g.BackgroundColor = Color.White; g.RowHeadersVisible = false;
-        g.BorderStyle = BorderStyle.None; g.EnableHeadersVisualStyles = false;
-        g.ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle { BackColor = Color.FromArgb(40, 40, 40), ForeColor = Color.White, Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
     }
 
     protected override async Task LoadDataAsync()
     {
         try
         {
-            if (_innerTabs.SelectedIndex == 0)
+            var list = await _svc.GetInterfacesAsync();
+            Grid.Rows.Clear();
+            foreach (var i in list)
             {
-                _list = await _svc.GetInterfacesAsync();
-                Grid.Rows.Clear();
-                foreach (var i in _list)
-                    Grid.Rows.Add(i.Id, i.Name, i.Ssid, i.Disabled ? "Sim" : "Não", i.SecurityProfile);
-            }
-            else
-            {
-                var profiles = await _svc.GetSecurityProfilesAsync();
-                _gridProfiles.Rows.Clear();
-                foreach (var p in profiles)
-                    _gridProfiles.Rows.Add(p.Id, p.Name, p.Mode, p.AuthenticationTypes);
+                Grid.Rows.Add(i.Id, i.Name, i.Ssid, i.Disabled ? "Sim" : "Não", i.SecurityProfile);
             }
         }
-        catch (Exception ex) { ShowError(ex); }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+        }
     }
 
-    private async Task ToggleIfAsync(bool enable)
+    private async void BtnEdit_Click(object? s, EventArgs e)
     {
         var id = SelectedId();
-        if (id == null) { MessageBox.Show("Seleciona uma interface wireless."); return; }
-        try { if (enable) await _svc.EnableInterfaceAsync(id); else await _svc.DisableInterfaceAsync(id); await LoadDataAsync(); }
-        catch (Exception ex) { ShowError(ex); }
+        if (id == null)
+        {
+            MessageBox.Show("Seleciona uma interface wireless.");
+            return;
+        }
+
+        try
+        {
+            var profiles = await _svc.GetSecurityProfilesAsync();
+            var row = Grid.SelectedRows[0];
+            string currentName = row.Cells["name"].Value?.ToString() ?? "";
+            string currentSsid = row.Cells["ssid"].Value?.ToString() ?? "";
+            string currentProfile = row.Cells["sec"].Value?.ToString() ?? "default";
+
+            var profileNames = profiles.Select(p => p.Name).ToList();
+
+            using var frm = new WirelessEditForm(currentName, currentSsid, currentProfile, profileNames);
+            if (frm.ShowDialog() != DialogResult.OK) return;
+
+            var changes = new Dictionary<string, object>
+            {
+                { "ssid", frm.Ssid },
+                { "security-profile", frm.SecurityProfile }
+            };
+
+            await _svc.UpdateInterfaceAsync(id, changes);
+            await LoadDataAsync();
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+        }
+    }
+
+    private async Task ToggleAsync(bool enable)
+    {
+        var id = SelectedId();
+        if (id == null) return;
+
+        try
+        {
+            if (enable) await _svc.EnableInterfaceAsync(id);
+            else await _svc.DisableInterfaceAsync(id);
+            await LoadDataAsync();
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+        }
+    }
+}
+
+public class WirelessEditForm : Form
+{
+    public string Ssid => _txtSsid.Text.Trim();
+    public string SecurityProfile => _cboProfile.Text;
+
+    private readonly TextBox _txtSsid = new();
+    private readonly ComboBox _cboProfile = new() { DropDownStyle = ComboBoxStyle.DropDownList };
+
+    public WirelessEditForm(string ifaceName, string currentSsid, string currentProfile, List<string> profiles)
+    {
+        Text = $"Configurar Wireless: {ifaceName}";
+        Size = new Size(340, 200);
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        StartPosition = FormStartPosition.CenterParent;
+        Font = new Font("Segoe UI", 9.5f);
+
+        int y = 20;
+
+        Controls.Add(new Label { Text = "SSID (Nome da Rede):", Location = new Point(14, y + 3), AutoSize = true });
+        _txtSsid.Location = new Point(150, y);
+        _txtSsid.Width = 150;
+        _txtSsid.Text = currentSsid;
+        Controls.Add(_txtSsid);
+
+        y += 40;
+
+        Controls.Add(new Label { Text = "Perfil de Segurança:", Location = new Point(14, y + 3), AutoSize = true });
+        _cboProfile.Location = new Point(150, y);
+        _cboProfile.Width = 150;
+
+        foreach (var p in profiles)
+        {
+            _cboProfile.Items.Add(p);
+        }
+
+        if (_cboProfile.Items.Contains(currentProfile))
+        {
+            _cboProfile.SelectedItem = currentProfile;
+        }
+        else if (_cboProfile.Items.Count > 0)
+        {
+            _cboProfile.SelectedIndex = 0;
+        }
+
+        Controls.Add(_cboProfile);
+
+        y += 45;
+
+        var ok = new Button
+        {
+            Text = "Guardar",
+            Location = new Point(150, y),
+            Size = new Size(150, 30),
+            BackColor = Color.DodgerBlue,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+
+        ok.Click += (_, _) =>
+        {
+            if (string.IsNullOrWhiteSpace(_txtSsid.Text))
+            {
+                MessageBox.Show("O SSID não pode estar vazio.");
+                return;
+            }
+            DialogResult = DialogResult.OK;
+            Close();
+        };
+
+        Controls.Add(ok);
+        AcceptButton = ok;
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// PERFIS DE SEGURANÇA (Com layout WinBox Completo)
+// ---------------------------------------------------------------------------------
+public class SecurityProfilesForm : Form
+{
+    private readonly WirelessService _svc;
+    private readonly DataGridView _grid = new();
+
+    public SecurityProfilesForm(WirelessService svc)
+    {
+        _svc = svc;
+        Text = "Gestão de Perfis de Segurança";
+        Size = new Size(600, 400);
+        StartPosition = FormStartPosition.CenterParent;
+        Font = new Font("Segoe UI", 9.5f);
+
+        var toolbar = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 40,
+            Padding = new Padding(5)
+        };
+
+        var btnAdd = new Button
+        {
+            Text = "＋ Novo",
+            Height = 30,
+            BackColor = Color.DodgerBlue,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+
+        btnAdd.Click += async (_, _) =>
+        {
+            using var frm = new SecurityProfileEditForm();
+            if (frm.ShowDialog() == DialogResult.OK)
+            {
+                try
+                {
+                    await _svc.CreateSecurityProfileAsync(frm.Profile);
+                    await LoadDataAsync();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message);
+                }
+            }
+        };
+
+        var btnEdit = new Button
+        {
+            Text = "✎ Editar",
+            Height = 30,
+            BackColor = Color.Gray,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+
+        btnEdit.Click += async (_, _) =>
+        {
+            if (_grid.SelectedRows.Count == 0) return;
+
+            var id = _grid.SelectedRows[0].Cells[".id"].Value?.ToString();
+
+            try
+            {
+                // Obter o perfil completo para preencher os vistos corretamente
+                var allProfs = await _svc.GetSecurityProfilesAsync();
+                var existingProf = allProfs.FirstOrDefault(p => p.Id == id);
+
+                if (existingProf == null) return;
+
+                using var frm = new SecurityProfileEditForm(existingProf);
+                if (frm.ShowDialog() == DialogResult.OK)
+                {
+                    var ch = new Dictionary<string, object>
+                    {
+                        { "name", frm.Profile.Name },
+                        { "comment", frm.Profile.Comment },
+                        { "mode", frm.Profile.Mode },
+                        { "authentication-types", frm.Profile.AuthenticationTypes },
+                        { "unicast-ciphers", frm.Profile.UnicastCiphers },
+                        { "group-ciphers", frm.Profile.GroupCiphers }
+                    };
+
+                    if (!string.IsNullOrWhiteSpace(frm.Profile.Wpa2PreSharedKey))
+                    {
+                        ch["wpa2-pre-shared-key"] = frm.Profile.Wpa2PreSharedKey;
+                    }
+
+                    await _svc.UpdateSecurityProfileAsync(id!, ch);
+                    await LoadDataAsync();
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message);
+            }
+        };
+
+        var btnDel = new Button
+        {
+            Text = "✕ Apagar",
+            Height = 30,
+            BackColor = Color.Firebrick,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+
+        btnDel.Click += async (_, _) =>
+        {
+            if (_grid.SelectedRows.Count == 0) return;
+
+            var id = _grid.SelectedRows[0].Cells[".id"].Value?.ToString();
+            if (MessageBox.Show("Tem a certeza que deseja apagar este perfil?", "Aviso", MessageBoxButtons.YesNo) == DialogResult.Yes)
+            {
+                try
+                {
+                    await _svc.DeleteSecurityProfileAsync(id!);
+                    await LoadDataAsync();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message);
+                }
+            }
+        };
+
+        toolbar.Controls.AddRange(new Control[] { btnAdd, btnEdit, btnDel });
+
+        _grid.Dock = DockStyle.Fill;
+        _grid.ReadOnly = true;
+        _grid.AllowUserToAddRows = false;
+        _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        _grid.BackgroundColor = Color.White;
+        _grid.RowHeadersVisible = false;
+
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", Visible = false });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "name", HeaderText = "Nome" });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "mode", HeaderText = "Modo" });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "auth", HeaderText = "Autenticação" });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "ciphers", HeaderText = "Cifras" });
+
+        Controls.Add(_grid);
+        Controls.Add(toolbar);
+
+        Load += async (_, _) => await LoadDataAsync();
+    }
+
+    private async Task LoadDataAsync()
+    {
+        try
+        {
+            var p = await _svc.GetSecurityProfilesAsync();
+            _grid.Rows.Clear();
+            foreach (var x in p)
+            {
+                _grid.Rows.Add(x.Id, x.Name, x.Mode, x.AuthenticationTypes, x.UnicastCiphers);
+            }
+        }
+        catch { }
+    }
+}
+
+public class SecurityProfileEditForm : Form
+{
+    public SecurityProfile Profile { get; private set; } = new();
+
+    private readonly TextBox _txtName = new();
+    private readonly ComboBox _cboMode = new() { DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly CheckBox _chkWpaPsk = new() { Text = "WPA PSK", AutoSize = true };
+    private readonly CheckBox _chkWpa2Psk = new() { Text = "WPA2 PSK", AutoSize = true };
+    private readonly CheckBox _chkAes = new() { Text = "aes ccm", AutoSize = true };
+    private readonly CheckBox _chkTkip = new() { Text = "tkip", AutoSize = true };
+    private readonly TextBox _txtPass = new();
+    private readonly TextBox _txtComment = new();
+
+    public SecurityProfileEditForm(SecurityProfile? existing = null)
+    {
+        Text = existing == null ? "Novo Perfil de Segurança" : "Editar Perfil de Segurança";
+        Size = new Size(420, 390);
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        StartPosition = FormStartPosition.CenterParent;
+        Font = new Font("Segoe UI", 9.5f);
+
+        int y = 20;
+
+        _cboMode.Items.AddRange(new[] { "none", "dynamic-keys", "static-keys-required", "static-keys-optional" });
+
+        Controls.Add(new Label { Text = "Nome:", Location = new Point(15, y + 3), AutoSize = true });
+        _txtName.Location = new Point(160, y);
+        _txtName.Width = 220;
+        Controls.Add(_txtName);
+        y += 35;
+
+        Controls.Add(new Label { Text = "Mode:", Location = new Point(15, y + 3), AutoSize = true });
+        _cboMode.Location = new Point(160, y);
+        _cboMode.Width = 220;
+        Controls.Add(_cboMode);
+        y += 35;
+
+        Controls.Add(new Label { Text = "Authentication Types:", Location = new Point(15, y + 3), AutoSize = true });
+        _chkWpaPsk.Location = new Point(160, y);
+        _chkWpa2Psk.Location = new Point(250, y);
+        Controls.Add(_chkWpaPsk);
+        Controls.Add(_chkWpa2Psk);
+        y += 35;
+
+        Controls.Add(new Label { Text = "Ciphers (Uni/Group):", Location = new Point(15, y + 3), AutoSize = true });
+        _chkAes.Location = new Point(160, y);
+        _chkTkip.Location = new Point(250, y);
+        Controls.Add(_chkAes);
+        Controls.Add(_chkTkip);
+        y += 35;
+
+        Controls.Add(new Label { Text = "WPA2 Pre-Shared Key:", Location = new Point(15, y + 3), AutoSize = true });
+        _txtPass.Location = new Point(160, y);
+        _txtPass.Width = 220;
+        Controls.Add(_txtPass);
+        y += 35;
+
+        Controls.Add(new Label { Text = "Comentário:", Location = new Point(15, y + 3), AutoSize = true });
+        _txtComment.Location = new Point(160, y);
+        _txtComment.Width = 220;
+        Controls.Add(_txtComment);
+        y += 35;
+
+        if (existing != null)
+        {
+            _txtName.Text = existing.Name;
+            _txtComment.Text = existing.Comment;
+
+            if (_cboMode.Items.Contains(existing.Mode))
+            {
+                _cboMode.SelectedItem = existing.Mode;
+            }
+
+            _chkWpaPsk.Checked = existing.AuthenticationTypes.Contains("wpa-psk");
+            _chkWpa2Psk.Checked = existing.AuthenticationTypes.Contains("wpa2-psk");
+
+            _chkAes.Checked = existing.UnicastCiphers.Contains("aes-ccm");
+            _chkTkip.Checked = existing.UnicastCiphers.Contains("tkip");
+
+            var info = new Label
+            {
+                Text = "Deixe a Pass em branco para não alterar.",
+                Location = new Point(160, y - 5),
+                AutoSize = true,
+                ForeColor = Color.Gray,
+                Font = new Font("Segoe UI", 8f)
+            };
+            Controls.Add(info);
+            y += 20;
+        }
+        else
+        {
+            _cboMode.SelectedItem = "dynamic-keys";
+            _chkWpa2Psk.Checked = true;
+            _chkAes.Checked = true;
+        }
+
+        var btnOk = new Button
+        {
+            Text = "Guardar",
+            Location = new Point(160, y),
+            Size = new Size(220, 30),
+            BackColor = Color.DodgerBlue,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+
+        btnOk.Click += (s, e) =>
+        {
+            if (string.IsNullOrWhiteSpace(_txtName.Text))
+            {
+                MessageBox.Show("Nome obrigatório.");
+                return;
+            }
+
+            if (existing == null && _cboMode.Text == "dynamic-keys" && _txtPass.Text.Length < 8)
+            {
+                MessageBox.Show("A password WPA2 tem de ter pelo menos 8 caracteres.");
+                return;
+            }
+
+            var authTypes = new List<string>();
+            if (_chkWpaPsk.Checked) authTypes.Add("wpa-psk");
+            if (_chkWpa2Psk.Checked) authTypes.Add("wpa2-psk");
+
+            var ciphers = new List<string>();
+            if (_chkAes.Checked) ciphers.Add("aes-ccm");
+            if (_chkTkip.Checked) ciphers.Add("tkip");
+
+            Profile = new SecurityProfile
+            {
+                Name = _txtName.Text.Trim(),
+                Wpa2PreSharedKey = _txtPass.Text.Trim(),
+                Comment = _txtComment.Text,
+                Mode = _cboMode.Text,
+                AuthenticationTypes = string.Join(",", authTypes),
+                UnicastCiphers = string.Join(",", ciphers),
+                GroupCiphers = string.Join(",", ciphers)
+            };
+
+            DialogResult = DialogResult.OK;
+            Close();
+        };
+
+        Controls.Add(btnOk);
+        AcceptButton = btnOk;
     }
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  BRIDGE PANEL E FORM
+//  BRIDGE PANEL
 // ════════════════════════════════════════════════════════════════════
 
 public class BridgePanel : BasePanel
@@ -278,6 +737,14 @@ public class BridgePanel : BasePanel
         AddToolbarButton("＋ Nova Bridge", Color.FromArgb(0, 120, 215)).Click += BtnAdd_Click;
         AddToolbarButton("✎ Editar", Color.FromArgb(80, 80, 80)).Click += BtnEdit_Click;
         AddToolbarButton("✕ Apagar", Color.FromArgb(180, 30, 30)).Click += async (_, _) => await DeleteAsync();
+
+        AddToolbarButton("🔌 Gerir Portas", Color.DarkCyan).Click += async (_, _) =>
+        {
+            using var frm = new BridgePortsForm(_svc, Client);
+            frm.ShowDialog();
+            await LoadDataAsync();
+        };
+
         AddToolbarButton("↺ Atualizar", Color.FromArgb(0, 100, 180)).Click += async (_, _) => await LoadDataAsync();
 
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", HeaderText = "ID", Visible = false });
@@ -295,85 +762,360 @@ public class BridgePanel : BasePanel
             var list = await _svc.GetBridgesAsync();
             Grid.Rows.Clear();
             foreach (var b in list)
+            {
                 Grid.Rows.Add(b.Id, b.Name, b.MacAddress, b.VlanFiltering ? "Sim" : "Não", b.Running ? "✔" : "✘", b.Disabled ? "Sim" : "Não");
+            }
         }
-        catch (Exception ex) { ShowError(ex); }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+        }
     }
 
     private async void BtnAdd_Click(object? s, EventArgs e)
     {
         using var frm = new BridgeEditForm();
-        if (frm.ShowDialog() != DialogResult.OK) return;
-        try { await _svc.CreateBridgeAsync(frm.Bridge); await LoadDataAsync(); }
-        catch (Exception ex) { ShowError(ex); }
+        if (frm.ShowDialog() == DialogResult.OK)
+        {
+            try
+            {
+                await _svc.CreateBridgeAsync(frm.Bridge);
+                await LoadDataAsync();
+            }
+            catch (Exception ex)
+            {
+                ShowError(ex);
+            }
+        }
     }
 
     private async void BtnEdit_Click(object? s, EventArgs e)
     {
-        var id = SelectedId(); if (id == null) { MessageBox.Show("Seleciona uma bridge."); return; }
+        var id = SelectedId();
+        if (id == null)
+        {
+            MessageBox.Show("Seleciona uma bridge.");
+            return;
+        }
+
         var row = Grid.SelectedRows[0];
-        var existing = new BridgeInterface { Id = id, Name = row.Cells["name"].Value?.ToString() ?? "" };
-        using var frm = new BridgeEditForm(existing);
-        if (frm.ShowDialog() != DialogResult.OK) return;
-        try { await _svc.UpdateBridgeAsync(id, new { name = frm.Bridge.Name, comment = frm.Bridge.Comment }); await LoadDataAsync(); }
-        catch (Exception ex) { ShowError(ex); }
+        bool currentVlan = row.Cells["vlan"].Value?.ToString() == "Sim";
+
+        using var frm = new BridgeEditForm(new BridgeInterface { Name = row.Cells["name"].Value?.ToString() ?? "", VlanFiltering = currentVlan });
+        if (frm.ShowDialog() == DialogResult.OK)
+        {
+            try
+            {
+                await _svc.UpdateBridgeAsync(id, new { name = frm.Bridge.Name, comment = frm.Bridge.Comment, @vlan_filtering = frm.Bridge.VlanFiltering ? "yes" : "no" });
+                await LoadDataAsync();
+            }
+            catch (Exception ex)
+            {
+                ShowError(ex);
+            }
+        }
     }
 
     private async Task DeleteAsync()
     {
-        var id = SelectedId(); if (id == null) { MessageBox.Show("Seleciona uma bridge."); return; }
-        if (MessageBox.Show("Apagar esta bridge?", "Confirmar", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
-        try { await _svc.DeleteBridgeAsync(id); await LoadDataAsync(); }
-        catch (Exception ex) { ShowError(ex); }
+        var id = SelectedId();
+        if (id == null) return;
+
+        if (MessageBox.Show("Apagar bridge?", "Confirmar", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+        {
+            try
+            {
+                await _svc.DeleteBridgeAsync(id);
+                await LoadDataAsync();
+            }
+            catch (Exception ex)
+            {
+                ShowError(ex);
+            }
+        }
+    }
+}
+
+public class BridgePortsForm : Form
+{
+    private readonly BridgeService _svc;
+    private readonly MikroTikClient _client;
+    private readonly DataGridView _grid = new();
+
+    public BridgePortsForm(BridgeService svc, MikroTikClient client)
+    {
+        _svc = svc;
+        _client = client;
+        Text = "Gestão de Portas da Bridge";
+        Size = new Size(500, 350);
+        StartPosition = FormStartPosition.CenterParent;
+        Font = new Font("Segoe UI", 9.5f);
+
+        var toolbar = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 40,
+            Padding = new Padding(5)
+        };
+
+        var btnAdd = new Button
+        {
+            Text = "＋ Adicionar Porta",
+            Height = 30,
+            AutoSize = true,
+            BackColor = Color.DodgerBlue,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+
+        btnAdd.Click += async (_, _) =>
+        {
+            try
+            {
+                var iSvc = new InterfaceService(_client);
+                var ifs = (await iSvc.GetAllAsync()).Select(i => i.Name).ToList();
+                var brs = (await _svc.GetBridgesAsync()).Select(b => b.Name).ToList();
+
+                if (brs.Count == 0)
+                {
+                    MessageBox.Show("Não existem Bridges criadas!");
+                    return;
+                }
+
+                using var f = new BridgePortEditForm(ifs, brs);
+                if (f.ShowDialog() == DialogResult.OK)
+                {
+                    await _svc.AddPortAsync(f.Port);
+                    await LoadDataAsync();
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message);
+            }
+        };
+
+        var btnDel = new Button
+        {
+            Text = "✕ Remover",
+            Height = 30,
+            BackColor = Color.Firebrick,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+
+        btnDel.Click += async (_, _) =>
+        {
+            if (_grid.SelectedRows.Count == 0) return;
+            var id = _grid.SelectedRows[0].Cells[".id"].Value?.ToString();
+
+            if (MessageBox.Show("Remover porta da bridge?", "Aviso", MessageBoxButtons.YesNo) == DialogResult.Yes)
+            {
+                try
+                {
+                    await _svc.RemovePortAsync(id!);
+                    await LoadDataAsync();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message);
+                }
+            }
+        };
+
+        toolbar.Controls.AddRange(new Control[] { btnAdd, btnDel });
+
+        _grid.Dock = DockStyle.Fill;
+        _grid.ReadOnly = true;
+        _grid.AllowUserToAddRows = false;
+        _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        _grid.BackgroundColor = Color.White;
+        _grid.RowHeadersVisible = false;
+
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", Visible = false });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "interface", HeaderText = "Interface" });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "bridge", HeaderText = "Bridge Destino" });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "disabled", HeaderText = "Desativada" });
+
+        Controls.Add(_grid);
+        Controls.Add(toolbar);
+
+        Load += async (_, _) => await LoadDataAsync();
+    }
+
+    private async Task LoadDataAsync()
+    {
+        try
+        {
+            var p = await _svc.GetPortsAsync();
+            _grid.Rows.Clear();
+            foreach (var x in p)
+            {
+                _grid.Rows.Add(x.Id, x.Interface, x.Bridge, x.Disabled ? "Sim" : "Não");
+            }
+        }
+        catch { }
     }
 }
 
 public class BridgeEditForm : Form
 {
     public BridgeInterface Bridge { get; private set; } = new();
+
     private readonly TextBox _txtName = new();
     private readonly TextBox _txtComment = new();
+    private readonly CheckBox _chkVlan = new() { Text = "Ativar VLAN Filtering", AutoSize = true };
 
     public BridgeEditForm(BridgeInterface? existing = null)
     {
         Text = existing == null ? "Nova Bridge" : "Editar Bridge";
-        Size = new Size(320, 180);
+        Size = new Size(320, 210);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         StartPosition = FormStartPosition.CenterParent;
         Font = new Font("Segoe UI", 9.5f);
 
-        Controls.Add(new Label { Text = "Nome:", Location = new Point(14, 20), AutoSize = true });
-        _txtName.Location = new Point(100, 17); _txtName.Width = 185; Controls.Add(_txtName);
+        int y = 20;
 
-        Controls.Add(new Label { Text = "Comentário:", Location = new Point(14, 58), AutoSize = true });
-        _txtComment.Location = new Point(100, 55); _txtComment.Width = 185; Controls.Add(_txtComment);
+        Controls.Add(new Label { Text = "Nome:", Location = new Point(14, y + 3), AutoSize = true });
+        _txtName.Location = new Point(100, y);
+        _txtName.Width = 185;
+        Controls.Add(_txtName);
+        y += 38;
 
-        if (existing != null) { _txtName.Text = existing.Name; _txtComment.Text = existing.Comment; }
+        Controls.Add(new Label { Text = "Comentário:", Location = new Point(14, y + 3), AutoSize = true });
+        _txtComment.Location = new Point(100, y);
+        _txtComment.Width = 185;
+        Controls.Add(_txtComment);
+        y += 38;
+
+        _chkVlan.Location = new Point(100, y);
+        Controls.Add(_chkVlan);
+        y += 38;
+
+        if (existing != null)
+        {
+            _txtName.Text = existing.Name;
+            _txtComment.Text = existing.Comment;
+            _chkVlan.Checked = existing.VlanFiltering;
+        }
 
         var ok = new Button
         {
             Text = "Guardar",
-            Location = new Point(100, 95),
-            Size = new Size(85, 28),
-            BackColor = Color.FromArgb(0, 120, 215),
+            Location = new Point(100, y),
+            Size = new Size(185, 28),
+            BackColor = Color.DodgerBlue,
             ForeColor = Color.White,
-            FlatStyle = FlatStyle.Flat
+            FlatStyle = FlatStyle.Flat,
+            DialogResult = DialogResult.OK
         };
-        ok.FlatAppearance.BorderSize = 0;
+
         ok.Click += (_, _) =>
         {
-            if (string.IsNullOrWhiteSpace(_txtName.Text)) { MessageBox.Show("Nome obrigatório."); return; }
-            Bridge = new BridgeInterface { Name = _txtName.Text.Trim(), Comment = _txtComment.Text };
-            DialogResult = DialogResult.OK; Close();
+            if (string.IsNullOrWhiteSpace(_txtName.Text))
+            {
+                MessageBox.Show("Nome obrigatório.");
+                return;
+            }
+
+            Bridge = new BridgeInterface
+            {
+                Name = _txtName.Text.Trim(),
+                Comment = _txtComment.Text,
+                VlanFiltering = _chkVlan.Checked
+            };
         };
+
+        Controls.Add(ok);
+        AcceptButton = ok;
+    }
+}
+
+public class BridgePortEditForm : Form
+{
+    public BridgePort Port { get; private set; } = new();
+
+    private readonly ComboBox _cboIface = new() { DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly ComboBox _cboBridge = new() { DropDownStyle = ComboBoxStyle.DropDownList };
+
+    public BridgePortEditForm(List<string> interfaces, List<string> bridges)
+    {
+        Text = "Adicionar Porta";
+        Size = new Size(340, 200);
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        StartPosition = FormStartPosition.CenterParent;
+        Font = new Font("Segoe UI", 9.5f);
+
+        foreach (var i in interfaces)
+        {
+            _cboIface.Items.Add(i);
+        }
+
+        if (_cboIface.Items.Count > 0)
+        {
+            _cboIface.SelectedIndex = 0;
+        }
+
+        foreach (var b in bridges)
+        {
+            _cboBridge.Items.Add(b);
+        }
+
+        if (_cboBridge.Items.Count > 0)
+        {
+            _cboBridge.SelectedIndex = 0;
+        }
+
+        int y = 20;
+
+        Controls.Add(new Label { Text = "Interface:", Location = new Point(14, y + 3), AutoSize = true });
+        _cboIface.Location = new Point(130, y);
+        _cboIface.Width = 170;
+        Controls.Add(_cboIface);
+        y += 40;
+
+        Controls.Add(new Label { Text = "Bridge:", Location = new Point(14, y + 3), AutoSize = true });
+        _cboBridge.Location = new Point(130, y);
+        _cboBridge.Width = 170;
+        Controls.Add(_cboBridge);
+        y += 50;
+
+        var ok = new Button
+        {
+            Text = "Adicionar",
+            Location = new Point(130, y),
+            Size = new Size(170, 30),
+            BackColor = Color.SeaGreen,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            DialogResult = DialogResult.OK
+        };
+
+        ok.Click += (_, _) =>
+        {
+            if (string.IsNullOrWhiteSpace(_cboIface.Text) || string.IsNullOrWhiteSpace(_cboBridge.Text))
+            {
+                MessageBox.Show("Obrigatório.");
+                return;
+            }
+
+            Port = new BridgePort
+            {
+                Interface = _cboIface.Text,
+                Bridge = _cboBridge.Text
+            };
+        };
+
         Controls.Add(ok);
         AcceptButton = ok;
     }
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  IP PANEL E FORM
+//  IP PANEL
 // ════════════════════════════════════════════════════════════════════
 
 public class IpPanel : BasePanel
@@ -383,16 +1125,16 @@ public class IpPanel : BasePanel
     public IpPanel(MikroTikClient client) : base(client)
     {
         _svc = new IpService(client);
-        AddToolbarButton("＋ Adicionar", Color.FromArgb(0, 120, 215)).Click += BtnAdd_Click;
-        AddToolbarButton("✕ Apagar", Color.FromArgb(180, 30, 30)).Click += async (_, _) => await DeleteAsync();
+
+        AddToolbarButton("＋ Adicionar", Color.DodgerBlue).Click += BtnAdd_Click;
+        AddToolbarButton("✕ Apagar", Color.Firebrick).Click += async (_, _) => await DeleteAsync();
         AddToolbarButton("↺ Atualizar", Color.FromArgb(0, 100, 180)).Click += async (_, _) => await LoadDataAsync();
 
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", HeaderText = "ID", Visible = false });
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "address", HeaderText = "Endereço", FillWeight = 30 });
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "network", HeaderText = "Rede", FillWeight = 25 });
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "interface", HeaderText = "Interface", FillWeight = 25 });
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "dynamic", HeaderText = "Dinâmico", FillWeight = 10 });
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "disabled", HeaderText = "Disabled", FillWeight = 10 });
+        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", Visible = false });
+        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "address", HeaderText = "Endereço" });
+        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "network", HeaderText = "Rede" });
+        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "interface", HeaderText = "Interface" });
+        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "dynamic", HeaderText = "Dinâmico" });
     }
 
     protected override async Task LoadDataAsync()
@@ -402,83 +1144,131 @@ public class IpPanel : BasePanel
             var list = await _svc.GetAddressesAsync();
             Grid.Rows.Clear();
             foreach (var a in list)
-                Grid.Rows.Add(a.Id, a.Address, a.Network, a.Interface, a.Dynamic ? "Sim" : "Não", a.Disabled ? "Sim" : "Não");
+            {
+                Grid.Rows.Add(a.Id, a.Address, a.Interface, a.Dynamic ? "Sim" : "Não");
+            }
         }
-        catch (Exception ex) { ShowError(ex); }
+        catch { }
     }
 
     private async void BtnAdd_Click(object? s, EventArgs e)
     {
-        using var frm = new IpAddressEditForm();
-        if (frm.ShowDialog() != DialogResult.OK) return;
-        try { await _svc.AddAddressAsync(frm.Address); await LoadDataAsync(); }
-        catch (Exception ex) { ShowError(ex); }
+        try
+        {
+            var iSvc = new InterfaceService(Client);
+            var interfaces = (await iSvc.GetAllAsync()).Select(i => i.Name).ToList();
+
+            if (interfaces.Count == 0)
+            {
+                MessageBox.Show("Não foram encontradas interfaces no router.", "Aviso");
+                return;
+            }
+
+            using var frm = new IpAddressEditForm(interfaces);
+            if (frm.ShowDialog() == DialogResult.OK)
+            {
+                await _svc.AddAddressAsync(frm.Address);
+                await LoadDataAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+        }
     }
 
     private async Task DeleteAsync()
     {
-        var id = SelectedId(); if (id == null) { MessageBox.Show("Seleciona um endereço."); return; }
-        if (MessageBox.Show("Apagar este endereço IP?", "Confirmar", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
-        try { await _svc.DeleteAddressAsync(id); await LoadDataAsync(); }
-        catch (Exception ex) { ShowError(ex); }
+        var id = SelectedId();
+        if (id != null && MessageBox.Show("Apagar IP?", "Confirma", MessageBoxButtons.YesNo) == DialogResult.Yes)
+        {
+            try
+            {
+                await _svc.DeleteAddressAsync(id);
+                await LoadDataAsync();
+            }
+            catch (Exception ex)
+            {
+                ShowError(ex);
+            }
+        }
     }
 }
 
 public class IpAddressEditForm : Form
 {
     public IpAddress Address { get; private set; } = new();
+
     private readonly TextBox _txtAddress = new();
-    private readonly TextBox _txtInterface = new();
+    private readonly ComboBox _cboInterface = new() { DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly TextBox _txtComment = new();
 
-    public IpAddressEditForm()
+    public IpAddressEditForm(List<string> interfaces)
     {
-        Text = "Adicionar Endereço IP"; Size = new Size(340, 210);
-        FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false;
-        StartPosition = FormStartPosition.CenterParent; Font = new Font("Segoe UI", 9.5f);
+        Text = "Novo IP";
+        Size = new Size(340, 210);
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        StartPosition = FormStartPosition.CenterParent;
+        Font = new Font("Segoe UI", 9.5f);
+
+        foreach (var i in interfaces)
+        {
+            _cboInterface.Items.Add(i);
+        }
+
+        if (_cboInterface.Items.Count > 0)
+        {
+            _cboInterface.SelectedIndex = 0;
+        }
 
         int y = 18;
-        void Row(string lbl, TextBox tb)
-        {
-            Controls.Add(new Label { Text = lbl, Location = new Point(14, y + 3), AutoSize = true });
-            tb.Location = new Point(120, y); tb.Width = 185; Controls.Add(tb); y += 38;
-        }
-        Row("Endereço (CIDR):", _txtAddress);
-        Row("Interface:", _txtInterface);
-        Row("Comentário:", _txtComment);
 
-        var hint = new Label
-        {
-            Text = "ex: 192.168.1.1/24",
-            Location = new Point(120, y - 26),
-            AutoSize = true,
-            ForeColor = Color.Gray,
-            Font = new Font("Segoe UI", 8f)
-        };
-        Controls.Add(hint);
+        Controls.Add(new Label { Text = "IP (CIDR):", Location = new Point(14, y + 3), AutoSize = true });
+        _txtAddress.Location = new Point(120, y);
+        _txtAddress.Width = 185;
+        Controls.Add(_txtAddress);
+        y += 38;
+
+        Controls.Add(new Label { Text = "Interface:", Location = new Point(14, y + 3), AutoSize = true });
+        _cboInterface.Location = new Point(120, y);
+        _cboInterface.Width = 185;
+        Controls.Add(_cboInterface);
+        y += 38;
+
+        Controls.Add(new Label { Text = "Comentário:", Location = new Point(14, y + 3), AutoSize = true });
+        _txtComment.Location = new Point(120, y);
+        _txtComment.Width = 185;
+        Controls.Add(_txtComment);
+        y += 38;
 
         var ok = new Button
         {
             Text = "Guardar",
-            Location = new Point(120, y + 8),
-            Size = new Size(85, 28),
-            BackColor = Color.FromArgb(0, 120, 215),
+            Location = new Point(120, y),
+            Size = new Size(185, 28),
+            BackColor = Color.DodgerBlue,
             ForeColor = Color.White,
-            FlatStyle = FlatStyle.Flat
+            FlatStyle = FlatStyle.Flat,
+            DialogResult = DialogResult.OK
         };
-        ok.FlatAppearance.BorderSize = 0;
-        ok.Click += (_, _) => {
-            if (string.IsNullOrWhiteSpace(_txtAddress.Text) || string.IsNullOrWhiteSpace(_txtInterface.Text))
-            { MessageBox.Show("Endereço e Interface são obrigatórios."); return; }
-            Address = new IpAddress { Address = _txtAddress.Text.Trim(), Interface = _txtInterface.Text.Trim(), Comment = _txtComment.Text };
-            DialogResult = DialogResult.OK; Close();
+
+        ok.Click += (_, _) =>
+        {
+            Address = new IpAddress
+            {
+                Address = _txtAddress.Text.Trim(),
+                Interface = _cboInterface.Text.Trim(),
+                Comment = _txtComment.Text
+            };
         };
-        Controls.Add(ok); AcceptButton = ok;
+
+        Controls.Add(ok);
+        AcceptButton = ok;
     }
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  ROUTES PANEL E FORM
+//  ROUTES PANEL
 // ════════════════════════════════════════════════════════════════════
 
 public class RoutesPanel : BasePanel
@@ -488,18 +1278,15 @@ public class RoutesPanel : BasePanel
     public RoutesPanel(MikroTikClient client) : base(client)
     {
         _svc = new RoutingService(client);
-        AddToolbarButton("＋ Nova Rota", Color.FromArgb(0, 120, 215)).Click += BtnAdd_Click;
-        AddToolbarButton("✕ Apagar", Color.FromArgb(180, 30, 30)).Click += async (_, _) => await DeleteAsync();
-        AddToolbarButton("✔ Ativar", Color.FromArgb(0, 140, 80)).Click += async (_, _) => await ToggleAsync(true);
-        AddToolbarButton("✕ Desativar", Color.FromArgb(100, 60, 60)).Click += async (_, _) => await ToggleAsync(false);
+
+        AddToolbarButton("＋ Nova Rota", Color.DodgerBlue).Click += BtnAdd_Click;
+        AddToolbarButton("✕ Apagar", Color.Firebrick).Click += async (_, _) => await DeleteAsync();
         AddToolbarButton("↺ Atualizar", Color.FromArgb(0, 100, 180)).Click += async (_, _) => await LoadDataAsync();
 
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", HeaderText = "ID", Visible = false });
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "dst-address", HeaderText = "Destino", FillWeight = 30 });
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "gateway", HeaderText = "Gateway", FillWeight = 25 });
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "distance", HeaderText = "Distância", FillWeight = 15 });
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "active", HeaderText = "Ativa", FillWeight = 15 });
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "dynamic", HeaderText = "Dinâmica", FillWeight = 15 });
+        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", Visible = false });
+        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "dst", HeaderText = "Destino" });
+        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "gw", HeaderText = "Gateway" });
+        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "dist", HeaderText = "Distância" });
     }
 
     protected override async Task LoadDataAsync()
@@ -509,105 +1296,121 @@ public class RoutesPanel : BasePanel
             var list = await _svc.GetRoutesAsync();
             Grid.Rows.Clear();
             foreach (var r in list)
-                Grid.Rows.Add(r.Id, r.DstAddress, r.Gateway, r.Distance, r.Active ? "✔" : "✘", r.Dynamic ? "Sim" : "Não");
+            {
+                Grid.Rows.Add(r.Id, r.DstAddress, r.Gateway, r.Distance);
+            }
         }
-        catch (Exception ex) { ShowError(ex); }
+        catch { }
     }
 
     private async void BtnAdd_Click(object? s, EventArgs e)
     {
         using var frm = new RouteEditForm();
-        if (frm.ShowDialog() != DialogResult.OK) return;
-        try { await _svc.AddRouteAsync(frm.Route); await LoadDataAsync(); }
-        catch (Exception ex) { ShowError(ex); }
+        if (frm.ShowDialog() == DialogResult.OK)
+        {
+            try
+            {
+                await _svc.AddRouteAsync(frm.Route);
+                await LoadDataAsync();
+            }
+            catch (Exception ex)
+            {
+                ShowError(ex);
+            }
+        }
     }
 
     private async Task DeleteAsync()
     {
-        var id = SelectedId(); if (id == null) { MessageBox.Show("Seleciona uma rota."); return; }
-        if (MessageBox.Show("Apagar esta rota?", "Confirmar", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
-        try { await _svc.DeleteRouteAsync(id); await LoadDataAsync(); }
-        catch (Exception ex) { ShowError(ex); }
-    }
-
-    private async Task ToggleAsync(bool enable)
-    {
-        var id = SelectedId(); if (id == null) { MessageBox.Show("Seleciona uma rota."); return; }
-        try
+        var id = SelectedId();
+        if (id != null && MessageBox.Show("Apagar Rota?", "Confirma", MessageBoxButtons.YesNo) == DialogResult.Yes)
         {
-            if (enable) await _svc.EnableRouteAsync(id); else await _svc.DisableRouteAsync(id);
-            await LoadDataAsync();
+            try
+            {
+                await _svc.DeleteRouteAsync(id);
+                await LoadDataAsync();
+            }
+            catch (Exception ex)
+            {
+                ShowError(ex);
+            }
         }
-        catch (Exception ex) { ShowError(ex); }
     }
 }
 
 public class RouteEditForm : Form
 {
     public StaticRoute Route { get; private set; } = new();
-    private readonly TextBox _txtDst = new(), _txtGw = new(), _txtComment = new();
-    private readonly NumericUpDown _numDist = new() { Minimum = 1, Maximum = 255, Value = 1 };
+
+    private readonly TextBox _txtDst = new();
+    private readonly TextBox _txtGw = new();
 
     public RouteEditForm()
     {
-        Text = "Nova Rota Estática"; Size = new Size(340, 230);
-        FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false;
-        StartPosition = FormStartPosition.CenterParent; Font = new Font("Segoe UI", 9.5f);
+        Text = "Nova Rota";
+        Size = new Size(340, 180);
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        StartPosition = FormStartPosition.CenterParent;
+        Font = new Font("Segoe UI", 9.5f);
 
-        int y = 18;
-        void Row(string lbl, Control ctrl)
-        {
-            Controls.Add(new Label { Text = lbl, Location = new Point(14, y + 3), AutoSize = true });
-            ctrl.Location = new Point(140, y); ((Control)ctrl).Width = 165; Controls.Add(ctrl); y += 38;
-        }
-        Row("Destino (CIDR):", _txtDst);
-        Row("Gateway:", _txtGw);
-        Row("Distância:", _numDist);
-        Row("Comentário:", _txtComment);
+        Controls.Add(new Label { Text = "Destino:", Location = new Point(14, 23) });
+        _txtDst.Location = new Point(100, 20);
+        _txtDst.Width = 200;
+        Controls.Add(_txtDst);
+
+        Controls.Add(new Label { Text = "Gateway:", Location = new Point(14, 63) });
+        _txtGw.Location = new Point(100, 60);
+        _txtGw.Width = 200;
+        Controls.Add(_txtGw);
 
         var ok = new Button
         {
             Text = "Guardar",
-            Location = new Point(140, y + 5),
-            Size = new Size(85, 28),
-            BackColor = Color.FromArgb(0, 120, 215),
+            Location = new Point(100, 100),
+            Size = new Size(200, 30),
+            BackColor = Color.DodgerBlue,
             ForeColor = Color.White,
-            FlatStyle = FlatStyle.Flat
+            FlatStyle = FlatStyle.Flat,
+            DialogResult = DialogResult.OK
         };
-        ok.FlatAppearance.BorderSize = 0;
-        ok.Click += (_, _) => {
-            if (string.IsNullOrWhiteSpace(_txtDst.Text) || string.IsNullOrWhiteSpace(_txtGw.Text))
-            { MessageBox.Show("Destino e Gateway são obrigatórios."); return; }
+
+        ok.Click += (_, _) =>
+        {
             Route = new StaticRoute
             {
                 DstAddress = _txtDst.Text.Trim(),
-                Gateway = _txtGw.Text.Trim(),
-                Distance = _numDist.Value.ToString(),
-                Comment = _txtComment.Text
+                Gateway = _txtGw.Text.Trim()
             };
-            DialogResult = DialogResult.OK; Close();
         };
-        Controls.Add(ok); AcceptButton = ok;
+
+        Controls.Add(ok);
+        AcceptButton = ok;
     }
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  DHCP PANEL
+//  DHCP PANEL (Agora com 3 Abas e Edição de Redes)
 // ════════════════════════════════════════════════════════════════════
 
 public class DhcpPanel : BasePanel
 {
     private readonly DhcpService _svc;
     private readonly TabControl _innerTabs = new();
+
     private readonly DataGridView _gridPools = new();
+    private readonly DataGridView _gridNetworks = new();
+
+    private readonly Button _btnAdd;
+    private readonly Button _btnEdit;
+    private readonly Button _btnDel;
     private readonly Button _btnEnable;
     private readonly Button _btnDisable;
 
     public DhcpPanel(MikroTikClient client) : base(client)
     {
         _svc = new DhcpService(client);
-
         Controls.Remove(Grid);
+
         _innerTabs.Dock = DockStyle.Fill;
 
         var tabServers = new TabPage("Servidores DHCP");
@@ -619,41 +1422,64 @@ public class DhcpPanel : BasePanel
         _gridPools.Dock = DockStyle.Fill;
         tabPools.Controls.Add(_gridPools);
 
-        _innerTabs.TabPages.AddRange(new[] { tabServers, tabPools });
+        var tabNetworks = new TabPage("Redes DHCP");
+        StyleGrid(_gridNetworks);
+        _gridNetworks.Dock = DockStyle.Fill;
+        tabNetworks.Controls.Add(_gridNetworks);
+
+        _innerTabs.TabPages.AddRange(new[] { tabServers, tabPools, tabNetworks });
         _innerTabs.SelectedIndexChanged += async (_, _) => await UpdateToolbarAndLoad();
         Controls.Add(_innerTabs);
 
-        AddToolbarButton("＋ Novo Servidor", Color.FromArgb(0, 120, 215)).Click += BtnAddServer_Click;
-        AddToolbarButton("＋ Nova Pool", Color.FromArgb(0, 140, 80)).Click += BtnAddPool_Click;
-        AddToolbarButton("✕ Apagar", Color.FromArgb(180, 30, 30)).Click += async (_, _) => await DeleteAsync();
+        _btnAdd = AddToolbarButton("＋ Adicionar", Color.DodgerBlue);
+        _btnAdd.Click += BtnAdd_Click;
+
+        _btnEdit = AddToolbarButton("✎ Editar", Color.FromArgb(80, 80, 80));
+        _btnEdit.Click += BtnEdit_Click;
+
+        _btnDel = AddToolbarButton("✕ Apagar", Color.Firebrick);
+        _btnDel.Click += BtnDel_Click;
 
         _btnEnable = AddToolbarButton("✔ Ativar", Color.FromArgb(0, 140, 80));
-        _btnDisable = AddToolbarButton("✕ Desativar", Color.FromArgb(100, 60, 60));
-
         _btnEnable.Click += async (_, _) => await ToggleAsync(true);
+
+        _btnDisable = AddToolbarButton("✕ Desativar", Color.FromArgb(100, 60, 60));
         _btnDisable.Click += async (_, _) => await ToggleAsync(false);
 
         AddToolbarButton("↺ Atualizar", Color.FromArgb(0, 100, 180)).Click += async (_, _) => await LoadDataAsync();
 
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", HeaderText = "ID", Visible = false });
+        // Colunas Servidores
+        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", Visible = false });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "name", HeaderText = "Nome", FillWeight = 25 });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "interface", HeaderText = "Interface", FillWeight = 25 });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "address-pool", HeaderText = "Pool", FillWeight = 20 });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "lease-time", HeaderText = "Lease Time", FillWeight = 15 });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "disabled", HeaderText = "Disabled", FillWeight = 15 });
 
-        _gridPools.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", HeaderText = "ID", Visible = false });
+        // Colunas Pools
+        _gridPools.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", Visible = false });
         _gridPools.Columns.Add(new DataGridViewTextBoxColumn { Name = "name", HeaderText = "Nome", FillWeight = 30 });
         _gridPools.Columns.Add(new DataGridViewTextBoxColumn { Name = "ranges", HeaderText = "Ranges", FillWeight = 70 });
+
+        // Colunas Networks
+        _gridNetworks.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", Visible = false });
+        _gridNetworks.Columns.Add(new DataGridViewTextBoxColumn { Name = "address", HeaderText = "Rede (Address)", FillWeight = 25 });
+        _gridNetworks.Columns.Add(new DataGridViewTextBoxColumn { Name = "gateway", HeaderText = "Gateway", FillWeight = 25 });
+        _gridNetworks.Columns.Add(new DataGridViewTextBoxColumn { Name = "dns-server", HeaderText = "DNS Server", FillWeight = 25 });
+        _gridNetworks.Columns.Add(new DataGridViewTextBoxColumn { Name = "comment", HeaderText = "Comentário", FillWeight = 25 });
     }
 
     private static void StyleGrid(DataGridView g)
     {
-        g.ReadOnly = true; g.AllowUserToAddRows = false; g.AllowUserToDeleteRows = false;
+        g.ReadOnly = true;
+        g.AllowUserToAddRows = false;
+        g.AllowUserToDeleteRows = false;
         g.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
         g.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-        g.BackgroundColor = Color.White; g.RowHeadersVisible = false;
-        g.BorderStyle = BorderStyle.None; g.EnableHeadersVisualStyles = false;
+        g.BackgroundColor = Color.White;
+        g.RowHeadersVisible = false;
+        g.BorderStyle = BorderStyle.None;
+        g.EnableHeadersVisualStyles = false;
         g.ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
         {
             BackColor = Color.FromArgb(40, 40, 40),
@@ -665,8 +1491,14 @@ public class DhcpPanel : BasePanel
     private async Task UpdateToolbarAndLoad()
     {
         bool isServer = _innerTabs.SelectedIndex == 0;
+        bool isPool = _innerTabs.SelectedIndex == 1;
+
         _btnEnable.Visible = isServer;
         _btnDisable.Visible = isServer;
+
+        // Não temos endpoint de edição (Update) para Pools no MikroTik de forma simples, mas para Servers e Networks sim
+        _btnEdit.Visible = !isPool;
+
         await LoadDataAsync();
     }
 
@@ -681,190 +1513,209 @@ public class DhcpPanel : BasePanel
                 foreach (var d in list)
                     Grid.Rows.Add(d.Id, d.Name, d.Interface, d.AddressPool, d.LeaseTime, d.Disabled ? "Sim" : "Não");
             }
-            else
+            else if (_innerTabs.SelectedIndex == 1)
             {
                 var list = await _svc.GetPoolsAsync();
                 _gridPools.Rows.Clear();
                 foreach (var p in list)
                     _gridPools.Rows.Add(p.Id, p.Name, p.Ranges);
             }
+            else
+            {
+                var list = await _svc.GetNetworksAsync();
+                _gridNetworks.Rows.Clear();
+                foreach (var n in list)
+                    _gridNetworks.Rows.Add(n.Id, n.Address, n.Gateway, n.DnsServer, n.Comment);
+            }
         }
-        catch (Exception ex) { ShowError(ex); }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+        }
     }
 
-    private async void BtnAddServer_Click(object? s, EventArgs e)
+    private async void BtnAdd_Click(object? s, EventArgs e)
     {
         try
         {
-            var pools = await _svc.GetPoolsAsync();
-            if (pools.Count == 0 && MessageBox.Show("Não existem Pools.\nDeseja criar uma Pool primeiro?", "Aviso", MessageBoxButtons.YesNo) == DialogResult.Yes)
+            if (_innerTabs.SelectedIndex == 0)
             {
-                _innerTabs.SelectedIndex = 1;
-                return;
-            }
+                var pools = await _svc.GetPoolsAsync();
+                if (pools.Count == 0 && MessageBox.Show("Não existem Pools.\nDeseja criar uma Pool primeiro?", "Aviso", MessageBoxButtons.YesNo) == DialogResult.Yes)
+                {
+                    _innerTabs.SelectedIndex = 1;
+                    return;
+                }
 
-            using var frm = new DhcpServerEditForm(pools);
-            if (frm.ShowDialog() != DialogResult.OK) return;
-            await _svc.CreateServerAsync(frm.Server);
-            await LoadDataAsync();
+                var iSvc = new InterfaceService(Client);
+                var interfaces = (await iSvc.GetAllAsync()).Select(i => i.Name).ToList();
+
+                using var frm = new DhcpServerEditForm(pools, interfaces);
+                if (frm.ShowDialog() == DialogResult.OK)
+                {
+                    await _svc.CreateServerAsync(frm.Server);
+                    await LoadDataAsync();
+                }
+            }
+            else if (_innerTabs.SelectedIndex == 1)
+            {
+                using var frm = new DhcpPoolEditForm();
+                if (frm.ShowDialog() == DialogResult.OK)
+                {
+                    await _svc.CreatePoolAsync(frm.Pool);
+                    await LoadDataAsync();
+                }
+            }
+            else
+            {
+                using var frm = new DhcpNetworkEditForm();
+                if (frm.ShowDialog() == DialogResult.OK)
+                {
+                    await _svc.CreateNetworkAsync(frm.Network);
+                    await LoadDataAsync();
+                }
+            }
         }
-        catch (Exception ex) { ShowError(ex); }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+        }
     }
 
-    private async void BtnAddPool_Click(object? s, EventArgs e)
+    private async void BtnEdit_Click(object? s, EventArgs e)
     {
-        using var frm = new DhcpPoolEditForm();
-        if (frm.ShowDialog() != DialogResult.OK) return;
-        try { await _svc.CreatePoolAsync(frm.Pool); await LoadDataAsync(); if (_innerTabs.SelectedIndex != 1) _innerTabs.SelectedIndex = 1; }
-        catch (Exception ex) { ShowError(ex); }
-    }
-
-    private async Task DeleteAsync()
-    {
-        if (_innerTabs.SelectedIndex == 0)
+        try
         {
-            var id = SelectedId();
-            if (id == null) { MessageBox.Show("Seleciona um servidor."); return; }
-            if (MessageBox.Show("Apagar servidor DHCP?", "Confirmar", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+            if (_innerTabs.SelectedIndex == 0)
             {
-                try { await _svc.DeleteServerAsync(id); await LoadDataAsync(); } catch (Exception ex) { ShowError(ex); }
+                if (Grid.SelectedRows.Count == 0) { MessageBox.Show("Selecione um servidor."); return; }
+                var row = Grid.SelectedRows[0];
+                var id = row.Cells[".id"].Value?.ToString();
+                if (id == null) return;
+
+                var pools = await _svc.GetPoolsAsync();
+                var iSvc = new InterfaceService(Client);
+                var interfaces = (await iSvc.GetAllAsync()).Select(i => i.Name).ToList();
+
+                var existing = new DhcpServer
+                {
+                    Name = row.Cells["name"].Value?.ToString() ?? "",
+                    Interface = row.Cells["interface"].Value?.ToString() ?? "",
+                    AddressPool = row.Cells["address-pool"].Value?.ToString() ?? "",
+                    LeaseTime = row.Cells["lease-time"].Value?.ToString() ?? "10m"
+                };
+
+                using var frm = new DhcpServerEditForm(pools, interfaces, existing);
+                if (frm.ShowDialog() == DialogResult.OK)
+                {
+                    await _svc.UpdateServerAsync(id, new
+                    {
+                        name = frm.Server.Name,
+                        @interface = frm.Server.Interface,
+                        @address_pool = frm.Server.AddressPool,
+                        @lease_time = frm.Server.LeaseTime
+                    });
+                    await LoadDataAsync();
+                }
+            }
+            else if (_innerTabs.SelectedIndex == 2)
+            {
+                if (_gridNetworks.SelectedRows.Count == 0) { MessageBox.Show("Selecione uma rede."); return; }
+                var row = _gridNetworks.SelectedRows[0];
+                var id = row.Cells[".id"].Value?.ToString();
+                if (id == null) return;
+
+                var existing = new DhcpNetwork
+                {
+                    Address = row.Cells["address"].Value?.ToString() ?? "",
+                    Gateway = row.Cells["gateway"].Value?.ToString() ?? "",
+                    DnsServer = row.Cells["dns-server"].Value?.ToString() ?? "",
+                    Comment = row.Cells["comment"].Value?.ToString() ?? ""
+                };
+
+                using var frm = new DhcpNetworkEditForm(existing);
+                if (frm.ShowDialog() == DialogResult.OK)
+                {
+                    await _svc.UpdateNetworkAsync(id, new
+                    {
+                        address = frm.Network.Address,
+                        gateway = frm.Network.Gateway,
+                        @dns_server = frm.Network.DnsServer,
+                        comment = frm.Network.Comment
+                    });
+                    await LoadDataAsync();
+                }
             }
         }
-        else
+        catch (Exception ex)
         {
-            var id = SelectedId();
-            if (id == null) { MessageBox.Show("Seleciona uma Pool."); return; }
+            ShowError(ex);
+        }
+    }
 
-            if (MessageBox.Show("Apagar esta Pool?\nSe estiver em uso, dará erro.", "Confirmar", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+    private async void BtnDel_Click(object? s, EventArgs e)
+    {
+        try
+        {
+            if (_innerTabs.SelectedIndex == 0)
             {
-                try { await _svc.DeletePoolAsync(id); await LoadDataAsync(); } catch (Exception ex) { ShowError(ex); }
+                var id = SelectedId();
+                if (id == null) { MessageBox.Show("Seleciona um servidor."); return; }
+                if (MessageBox.Show("Apagar servidor DHCP?", "Confirmar", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+                {
+                    await _svc.DeleteServerAsync(id);
+                    await LoadDataAsync();
+                }
             }
+            else if (_innerTabs.SelectedIndex == 1)
+            {
+                if (_gridPools.SelectedRows.Count == 0) { MessageBox.Show("Seleciona uma Pool."); return; }
+                var id = _gridPools.SelectedRows[0].Cells[".id"].Value?.ToString();
+                if (id == null) return;
+
+                if (MessageBox.Show("Apagar esta Pool?\nSe estiver em uso, dará erro.", "Confirmar", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+                {
+                    await _svc.DeletePoolAsync(id);
+                    await LoadDataAsync();
+                }
+            }
+            else
+            {
+                if (_gridNetworks.SelectedRows.Count == 0) { MessageBox.Show("Seleciona uma Rede."); return; }
+                var id = _gridNetworks.SelectedRows[0].Cells[".id"].Value?.ToString();
+                if (id == null) return;
+
+                if (MessageBox.Show("Apagar esta Rede?", "Confirmar", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+                {
+                    await _svc.DeleteNetworkAsync(id);
+                    await LoadDataAsync();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex);
         }
     }
 
     private async Task ToggleAsync(bool enable)
     {
         if (_innerTabs.SelectedIndex != 0) return;
-        var id = SelectedId(); if (id == null) { MessageBox.Show("Seleciona um servidor."); return; }
+        var id = SelectedId();
+        if (id == null) { MessageBox.Show("Seleciona um servidor."); return; }
+
         try
         {
-            if (enable) await _svc.EnableServerAsync(id); else await _svc.DisableServerAsync(id);
+            if (enable) await _svc.EnableServerAsync(id);
+            else await _svc.DisableServerAsync(id);
             await LoadDataAsync();
         }
-        catch (Exception ex) { ShowError(ex); }
-    }
-}
-
-public class DhcpServerEditForm : Form
-{
-    public DhcpServer Server { get; private set; } = new();
-    private readonly TextBox _txtName = new();
-    private readonly TextBox _txtInterface = new();
-    private readonly ComboBox _cboPool = new() { DropDownStyle = ComboBoxStyle.DropDownList };
-    private readonly TextBox _txtLease = new();
-
-    public DhcpServerEditForm(List<DhcpPool> pools)
-    {
-        Text = "Novo Servidor DHCP";
-        Size = new Size(340, 230);
-        FormBorderStyle = FormBorderStyle.FixedDialog;
-        MaximizeBox = false;
-        StartPosition = FormStartPosition.CenterParent;
-        Font = new Font("Segoe UI", 9.5f);
-        _txtLease.Text = "10m";
-
-        foreach (var p in pools) _cboPool.Items.Add(p.Name);
-        if (_cboPool.Items.Count > 0) _cboPool.SelectedIndex = 0;
-
-        int y = 18;
-        void Row(string lbl, Control ctrl)
+        catch (Exception ex)
         {
-            Controls.Add(new Label { Text = lbl, Location = new Point(14, y + 3), AutoSize = true });
-            ctrl.Location = new Point(120, y);
-            ctrl.Width = 185;
-            Controls.Add(ctrl);
-            y += 38;
+            ShowError(ex);
         }
-
-        Row("Nome:", _txtName);
-        Row("Interface:", _txtInterface);
-        Row("Pool:", _cboPool);
-        Row("Lease Time:", _txtLease);
-
-        var ok = new Button
-        {
-            Text = "Guardar",
-            Location = new Point(120, y + 5),
-            Size = new Size(85, 28),
-            BackColor = Color.FromArgb(0, 120, 215),
-            ForeColor = Color.White,
-            FlatStyle = FlatStyle.Flat
-        };
-        ok.FlatAppearance.BorderSize = 0;
-
-        ok.Click += (_, _) => {
-            if (string.IsNullOrWhiteSpace(_txtName.Text) || string.IsNullOrWhiteSpace(_txtInterface.Text) || string.IsNullOrWhiteSpace(_cboPool.Text))
-            { MessageBox.Show("Nome, Interface e Pool são obrigatórios."); return; }
-
-            Server = new DhcpServer
-            {
-                Name = _txtName.Text.Trim(),
-                Interface = _txtInterface.Text.Trim(),
-                AddressPool = _cboPool.Text,
-                LeaseTime = _txtLease.Text.Trim()
-            };
-            DialogResult = DialogResult.OK;
-            Close();
-        };
-        Controls.Add(ok);
-        AcceptButton = ok;
     }
 }
-
-public class DhcpPoolEditForm : Form
-{
-    public DhcpPool Pool { get; private set; } = new();
-    private readonly TextBox _txtName = new();
-    private readonly TextBox _txtRanges = new();
-
-    public DhcpPoolEditForm()
-    {
-        Text = "Nova Pool de IPs"; Size = new Size(340, 200);
-        FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false;
-        StartPosition = FormStartPosition.CenterParent; Font = new Font("Segoe UI", 9.5f);
-
-        int y = 18;
-        void Row(string lbl, TextBox tb)
-        {
-            Controls.Add(new Label { Text = lbl, Location = new Point(14, y + 3), AutoSize = true });
-            tb.Location = new Point(120, y); tb.Width = 185; Controls.Add(tb); y += 38;
-        }
-        Row("Nome:", _txtName);
-        Row("Ranges:", _txtRanges);
-
-        Controls.Add(new Label
-        {
-            Text = "Ex: 192.168.88.10-192.168.88.254",
-            Location = new Point(120, y - 5),
-            AutoSize = true,
-            ForeColor = Color.Gray,
-            Font = new Font("Segoe UI", 8f)
-        });
-
-        var ok = new Button { Text = "Guardar", Location = new Point(120, y + 20), Size = new Size(85, 28), BackColor = Color.FromArgb(0, 120, 215), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
-        ok.FlatAppearance.BorderSize = 0;
-        ok.Click += (_, _) => {
-            if (string.IsNullOrWhiteSpace(_txtName.Text) || string.IsNullOrWhiteSpace(_txtRanges.Text)) { MessageBox.Show("Obrigatório."); return; }
-            Pool = new DhcpPool { Name = _txtName.Text.Trim(), Ranges = _txtRanges.Text.Trim() };
-            DialogResult = DialogResult.OK; Close();
-        };
-        Controls.Add(ok); AcceptButton = ok;
-    }
-}
-
-// ════════════════════════════════════════════════════════════════════
-//  POOLS PANEL
-// ════════════════════════════════════════════════════════════════════
 
 public class PoolsPanel : BasePanel
 {
@@ -873,13 +1724,14 @@ public class PoolsPanel : BasePanel
     public PoolsPanel(MikroTikClient client) : base(client)
     {
         _svc = new DhcpService(client);
-        AddToolbarButton("＋ Nova Pool", Color.FromArgb(0, 120, 215)).Click += BtnAdd_Click;
-        AddToolbarButton("✕ Apagar", Color.FromArgb(180, 30, 30)).Click += async (_, _) => await DeleteAsync();
+
+        AddToolbarButton("＋ Nova Pool", Color.DodgerBlue).Click += BtnAdd_Click;
+        AddToolbarButton("✕ Apagar", Color.Firebrick).Click += async (_, _) => await DeleteAsync();
         AddToolbarButton("↺ Atualizar", Color.FromArgb(0, 100, 180)).Click += async (_, _) => await LoadDataAsync();
 
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", HeaderText = "ID", Visible = false });
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "name", HeaderText = "Nome", FillWeight = 30 });
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "ranges", HeaderText = "Ranges", FillWeight = 70 });
+        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", Visible = false });
+        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "name", HeaderText = "Nome" });
+        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "ranges", HeaderText = "Ranges" });
     }
 
     protected override async Task LoadDataAsync()
@@ -889,101 +1741,543 @@ public class PoolsPanel : BasePanel
             var list = await _svc.GetPoolsAsync();
             Grid.Rows.Clear();
             foreach (var p in list)
+            {
                 Grid.Rows.Add(p.Id, p.Name, p.Ranges);
+            }
         }
-        catch (Exception ex) { ShowError(ex); }
+        catch { }
     }
 
     private async void BtnAdd_Click(object? s, EventArgs e)
     {
         using var frm = new DhcpPoolEditForm();
-        if (frm.ShowDialog() != DialogResult.OK) return;
-        try { await _svc.CreatePoolAsync(frm.Pool); await LoadDataAsync(); }
-        catch (Exception ex) { ShowError(ex); }
+        if (frm.ShowDialog() == DialogResult.OK)
+        {
+            await _svc.CreatePoolAsync(frm.Pool);
+            await LoadDataAsync();
+        }
     }
 
     private async Task DeleteAsync()
     {
         var id = SelectedId();
-        if (id == null) { MessageBox.Show("Seleciona uma Pool."); return; }
+        if (id != null && MessageBox.Show("Apagar Pool?", "Confirma", MessageBoxButtons.YesNo) == DialogResult.Yes)
+        {
+            await _svc.DeletePoolAsync(id);
+            await LoadDataAsync();
+        }
+    }
+}
 
-        if (MessageBox.Show("Apagar esta Pool?\nSe estiver em uso, dará erro.", "Confirmar", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+public class DhcpServerEditForm : Form
+{
+    public DhcpServer Server { get; private set; } = new();
 
-        try { await _svc.DeletePoolAsync(id); await LoadDataAsync(); }
-        catch (Exception ex) { ShowError(ex); }
+    private readonly TextBox _txtName = new();
+    private readonly ComboBox _cboIface = new() { DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly ComboBox _cboPool = new() { DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly TextBox _txtLease = new();
+
+    public DhcpServerEditForm(List<DhcpPool> pools, List<string> interfaces, DhcpServer? existing = null)
+    {
+        Text = existing == null ? "Novo Servidor DHCP" : "Editar Servidor DHCP";
+        Size = new Size(340, 230);
+        StartPosition = FormStartPosition.CenterParent;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        Font = new Font("Segoe UI", 9.5f);
+
+        foreach (var p in pools)
+        {
+            _cboPool.Items.Add(p.Name);
+        }
+
+        if (_cboPool.Items.Count > 0)
+        {
+            _cboPool.SelectedIndex = 0;
+        }
+
+        foreach (var i in interfaces)
+        {
+            _cboIface.Items.Add(i);
+        }
+
+        if (_cboIface.Items.Count > 0)
+        {
+            _cboIface.SelectedIndex = 0;
+        }
+
+        int y = 18;
+
+        Controls.Add(new Label { Text = "Nome:", Location = new Point(14, y + 3), AutoSize = true });
+        _txtName.Location = new Point(120, y);
+        _txtName.Width = 185;
+        Controls.Add(_txtName);
+        y += 38;
+
+        Controls.Add(new Label { Text = "Interface:", Location = new Point(14, y + 3), AutoSize = true });
+        _cboIface.Location = new Point(120, y);
+        _cboIface.Width = 185;
+        Controls.Add(_cboIface);
+        y += 38;
+
+        Controls.Add(new Label { Text = "Pool:", Location = new Point(14, y + 3), AutoSize = true });
+        _cboPool.Location = new Point(120, y);
+        _cboPool.Width = 185;
+        Controls.Add(_cboPool);
+        y += 38;
+
+        Controls.Add(new Label { Text = "Lease Time:", Location = new Point(14, y + 3), AutoSize = true });
+        _txtLease.Location = new Point(120, y);
+        _txtLease.Width = 185;
+        Controls.Add(_txtLease);
+        y += 38;
+
+        if (existing != null)
+        {
+            _txtName.Text = existing.Name;
+            if (_cboIface.Items.Contains(existing.Interface)) _cboIface.SelectedItem = existing.Interface;
+            if (_cboPool.Items.Contains(existing.AddressPool)) _cboPool.SelectedItem = existing.AddressPool;
+            _txtLease.Text = existing.LeaseTime;
+        }
+        else
+        {
+            _txtLease.Text = "10m";
+        }
+
+        var btn = new Button
+        {
+            Text = "Guardar",
+            Location = new Point(120, y),
+            Size = new Size(185, 28),
+            BackColor = Color.DodgerBlue,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        btn.FlatAppearance.BorderSize = 0;
+
+        btn.Click += (_, _) =>
+        {
+            if (string.IsNullOrWhiteSpace(_txtName.Text) || string.IsNullOrWhiteSpace(_cboIface.Text) || string.IsNullOrWhiteSpace(_cboPool.Text))
+            {
+                MessageBox.Show("Nome, Interface e Pool são obrigatórios.");
+                return;
+            }
+
+            Server = new DhcpServer
+            {
+                Name = _txtName.Text.Trim(),
+                Interface = _cboIface.Text.Trim(),
+                AddressPool = _cboPool.Text,
+                LeaseTime = _txtLease.Text.Trim()
+            };
+            DialogResult = DialogResult.OK;
+            Close();
+        };
+
+        Controls.Add(btn);
+        AcceptButton = btn;
+    }
+}
+
+public class DhcpPoolEditForm : Form
+{
+    public DhcpPool Pool { get; private set; } = new();
+
+    private readonly TextBox _txtName = new();
+    private readonly TextBox _txtRanges = new();
+
+    public DhcpPoolEditForm()
+    {
+        Text = "Nova Pool";
+        Size = new Size(340, 180);
+        StartPosition = FormStartPosition.CenterParent;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        Font = new Font("Segoe UI", 9.5f);
+
+        int y = 18;
+
+        Controls.Add(new Label { Text = "Nome:", Location = new Point(14, y + 3), AutoSize = true });
+        _txtName.Location = new Point(100, y);
+        _txtName.Width = 200;
+        Controls.Add(_txtName);
+        y += 38;
+
+        Controls.Add(new Label { Text = "Ranges:", Location = new Point(14, y + 3), AutoSize = true });
+        _txtRanges.Location = new Point(100, y);
+        _txtRanges.Width = 200;
+        Controls.Add(_txtRanges);
+        y += 38;
+
+        var btn = new Button
+        {
+            Text = "Guardar",
+            Location = new Point(100, y),
+            Size = new Size(200, 28),
+            BackColor = Color.DodgerBlue,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        btn.FlatAppearance.BorderSize = 0;
+
+        btn.Click += (_, _) =>
+        {
+            if (string.IsNullOrWhiteSpace(_txtName.Text) || string.IsNullOrWhiteSpace(_txtRanges.Text))
+            {
+                MessageBox.Show("Preencha todos os campos.");
+                return;
+            }
+
+            Pool = new DhcpPool
+            {
+                Name = _txtName.Text.Trim(),
+                Ranges = _txtRanges.Text.Trim()
+            };
+            DialogResult = DialogResult.OK;
+            Close();
+        };
+
+        Controls.Add(btn);
+        AcceptButton = btn;
+    }
+}
+
+public class DhcpNetworkEditForm : Form
+{
+    public DhcpNetwork Network { get; private set; } = new();
+
+    private readonly TextBox _txtAddress = new();
+    private readonly TextBox _txtGateway = new();
+    private readonly TextBox _txtDns = new();
+    private readonly TextBox _txtComment = new();
+
+    public DhcpNetworkEditForm(DhcpNetwork? existing = null)
+    {
+        Text = existing == null ? "Nova Rede DHCP" : "Editar Rede DHCP";
+        Size = new Size(360, 260);
+        StartPosition = FormStartPosition.CenterParent;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        Font = new Font("Segoe UI", 9.5f);
+
+        int y = 18;
+
+        Controls.Add(new Label { Text = "Rede (CIDR):", Location = new Point(14, y + 3), AutoSize = true });
+        _txtAddress.Location = new Point(120, y);
+        _txtAddress.Width = 200;
+        Controls.Add(_txtAddress);
+        y += 38;
+
+        Controls.Add(new Label { Text = "Gateway:", Location = new Point(14, y + 3), AutoSize = true });
+        _txtGateway.Location = new Point(120, y);
+        _txtGateway.Width = 200;
+        Controls.Add(_txtGateway);
+        y += 38;
+
+        Controls.Add(new Label { Text = "Servidor DNS:", Location = new Point(14, y + 3), AutoSize = true });
+        _txtDns.Location = new Point(120, y);
+        _txtDns.Width = 200;
+        Controls.Add(_txtDns);
+        y += 38;
+
+        Controls.Add(new Label { Text = "Comentário:", Location = new Point(14, y + 3), AutoSize = true });
+        _txtComment.Location = new Point(120, y);
+        _txtComment.Width = 200;
+        Controls.Add(_txtComment);
+        y += 38;
+
+        if (existing != null)
+        {
+            _txtAddress.Text = existing.Address;
+            _txtGateway.Text = existing.Gateway;
+            _txtDns.Text = existing.DnsServer;
+            _txtComment.Text = existing.Comment;
+        }
+
+        var btn = new Button
+        {
+            Text = "Guardar",
+            Location = new Point(120, y),
+            Size = new Size(200, 28),
+            BackColor = Color.DodgerBlue,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        btn.FlatAppearance.BorderSize = 0;
+
+        btn.Click += (_, _) =>
+        {
+            if (string.IsNullOrWhiteSpace(_txtAddress.Text))
+            {
+                MessageBox.Show("A rede (CIDR) é obrigatória.");
+                return;
+            }
+
+            Network = new DhcpNetwork
+            {
+                Address = _txtAddress.Text.Trim(),
+                Gateway = _txtGateway.Text.Trim(),
+                DnsServer = _txtDns.Text.Trim(),
+                Comment = _txtComment.Text.Trim()
+            };
+            DialogResult = DialogResult.OK;
+            Close();
+        };
+
+        Controls.Add(btn);
+        AcceptButton = btn;
     }
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  DNS PANEL (COM DNS ESTÁTICO INCLUÍDO)
+//  DNS PANEL
 // ════════════════════════════════════════════════════════════════════
 
 public class DnsPanel : BasePanel
 {
     private readonly DnsService _svc;
+
     private readonly TextBox _txtServers = new();
     private readonly CheckBox _chkAllow = new() { Text = "Permitir pedidos remotos", AutoSize = true };
-    private readonly DataGridView _gridStatic = new();
 
     public DnsPanel(MikroTikClient client) : base(client)
     {
         _svc = new DnsService(client);
         Controls.Remove(Grid);
 
-        var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterDistance = 160 };
+        var pnl = new Panel { Dock = DockStyle.Fill, Padding = new Padding(20) };
 
-        var pnlTop = new Panel { Dock = DockStyle.Fill, Padding = new Padding(20) };
-        var lblServers = new Label { Text = "Servidores Upstream DNS (ex: 8.8.8.8, 1.1.1.1):", Location = new Point(20, 15), AutoSize = true, Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
-        _txtServers.Location = new Point(20, 38); _txtServers.Width = 350;
-        _chkAllow.Location = new Point(20, 70);
-        var btnSave = new Button { Text = "💾 Guardar Definições", Location = new Point(20, 105), Width = 160, Height = 32, BackColor = Color.DodgerBlue, ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
-        btnSave.Click += async (_, _) => { try { await _svc.UpdateSettingsAsync(_txtServers.Text, _chkAllow.Checked); MessageBox.Show("Configuração guardada!"); } catch (Exception ex) { ShowError(ex); } };
-        var btnFlush = new Button { Text = "🗑 Limpar Cache", Location = new Point(190, 105), Width = 150, Height = 32, BackColor = Color.Chocolate, ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
-        btnFlush.Click += async (_, _) => { try { await _svc.FlushCacheAsync(); MessageBox.Show("Cache limpa!"); } catch (Exception ex) { ShowError(ex); } };
-        pnlTop.Controls.AddRange(new Control[] { lblServers, _txtServers, _chkAllow, btnSave, btnFlush });
+        var lblServers = new Label
+        {
+            Text = "Servidores Upstream DNS (ex: 8.8.8.8, 1.1.1.1):",
+            Location = new Point(20, 20),
+            AutoSize = true,
+            Font = new Font("Segoe UI", 9f, FontStyle.Bold)
+        };
 
-        var pnlBottom = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10) };
-        var lblStatic = new Label { Text = "Entradas DNS Estático (Domínios Locais):", Dock = DockStyle.Top, Height = 30, Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
-        var barStatic = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 40 };
-        var btnAddS = new Button { Text = "＋ Novo Domínio", Width = 130, Height = 28, BackColor = Color.SeaGreen, ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
-        btnAddS.Click += async (_, _) => { using var f = new DnsStaticEditForm(); if (f.ShowDialog() == DialogResult.OK) { try { await _svc.AddStaticEntryAsync(f.Entry); await LoadDataAsync(); } catch (Exception ex) { ShowError(ex); } } };
-        var btnDelS = new Button { Text = "✕ Remover Selecionado", Width = 160, Height = 28, BackColor = Color.Firebrick, ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
-        btnDelS.Click += async (_, _) => { if (_gridStatic.SelectedRows.Count == 0) return; var id = _gridStatic.SelectedRows[0].Cells[".id"].Value?.ToString(); if (id != null) { await _svc.DeleteStaticEntryAsync(id); await LoadDataAsync(); } };
-        barStatic.Controls.AddRange(new[] { btnAddS, btnDelS });
+        _txtServers.Location = new Point(20, 45);
+        _txtServers.Width = 350;
+        _chkAllow.Location = new Point(20, 80);
 
-        _gridStatic.Dock = DockStyle.Fill; _gridStatic.ReadOnly = true; _gridStatic.AllowUserToAddRows = false; _gridStatic.RowHeadersVisible = false; _gridStatic.SelectionMode = DataGridViewSelectionMode.FullRowSelect; _gridStatic.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill; _gridStatic.BackgroundColor = Color.White;
-        _gridStatic.Columns.AddRange(new DataGridViewColumn[] { new DataGridViewTextBoxColumn { Name = ".id", Visible = false }, new DataGridViewTextBoxColumn { Name = "name", HeaderText = "Nome de Domínio" }, new DataGridViewTextBoxColumn { Name = "address", HeaderText = "Endereço IP" }, new DataGridViewTextBoxColumn { Name = "comment", HeaderText = "Comentário" } });
+        var btnSave = new Button
+        {
+            Text = "💾 Guardar Definições",
+            Location = new Point(20, 120),
+            Width = 160,
+            Height = 32,
+            BackColor = Color.DodgerBlue,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        btnSave.Click += async (_, _) =>
+        {
+            try
+            {
+                await _svc.UpdateSettingsAsync(_txtServers.Text, _chkAllow.Checked);
+                MessageBox.Show("Configuração guardada!");
+            }
+            catch (Exception ex)
+            {
+                ShowError(ex);
+            }
+        };
 
-        pnlBottom.Controls.Add(_gridStatic); pnlBottom.Controls.Add(barStatic); pnlBottom.Controls.Add(lblStatic);
+        var btnFlush = new Button
+        {
+            Text = "🗑 Limpar Cache",
+            Location = new Point(190, 120),
+            Width = 150,
+            Height = 32,
+            BackColor = Color.Chocolate,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        btnFlush.Click += async (_, _) =>
+        {
+            try
+            {
+                await _svc.FlushCacheAsync();
+                MessageBox.Show("Cache limpa!");
+            }
+            catch (Exception ex)
+            {
+                ShowError(ex);
+            }
+        };
 
-        split.Panel1.Controls.Add(pnlTop); split.Panel2.Controls.Add(pnlBottom);
-        Controls.Add(split);
+        var btnStatic = new Button
+        {
+            Text = "🌐 Gerir DNS Estático",
+            Location = new Point(20, 170),
+            Width = 320,
+            Height = 35,
+            BackColor = Color.SeaGreen,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        btnStatic.Click += (_, _) =>
+        {
+            using var f = new DnsStaticForm(_svc);
+            f.ShowDialog();
+        };
+
+        pnl.Controls.AddRange(new Control[] { lblServers, _txtServers, _chkAllow, btnSave, btnFlush, btnStatic });
+        Controls.Add(pnl);
     }
 
     protected override async Task LoadDataAsync()
     {
         try
         {
-            var s = await _svc.GetSettingsAsync(); if (s != null) { _txtServers.Text = s.Servers; _chkAllow.Checked = s.AllowRemoteRequests; }
-            var list = await _svc.GetStaticEntriesAsync(); _gridStatic.Rows.Clear();
-            foreach (var e in list) _gridStatic.Rows.Add(e.Id, e.Name, e.Address, e.Comment);
+            var s = await _svc.GetSettingsAsync();
+            if (s != null)
+            {
+                _txtServers.Text = s.Servers;
+                _chkAllow.Checked = s.AllowRemoteRequests;
+            }
         }
-        catch (Exception ex) { ShowError(ex); }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+        }
+    }
+}
+
+public class DnsStaticForm : Form
+{
+    private readonly DnsService _svc;
+    private readonly DataGridView _grid = new();
+
+    public DnsStaticForm(DnsService svc)
+    {
+        _svc = svc;
+        Text = "Gestão de DNS Estático";
+        Size = new Size(500, 350);
+        StartPosition = FormStartPosition.CenterParent;
+        Font = new Font("Segoe UI", 9.5f);
+
+        var tbar = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 40,
+            Padding = new Padding(5)
+        };
+
+        var bA = new Button
+        {
+            Text = "＋ Novo Domínio",
+            Height = 30,
+            BackColor = Color.DodgerBlue,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            AutoSize = true
+        };
+        bA.Click += async (_, _) =>
+        {
+            using var f = new DnsStaticEditForm();
+            if (f.ShowDialog() == DialogResult.OK)
+            {
+                await _svc.AddStaticEntryAsync(f.Entry);
+                await LoadData();
+            }
+        };
+
+        var bD = new Button
+        {
+            Text = "✕ Remover",
+            Height = 30,
+            BackColor = Color.Firebrick,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        bD.Click += async (_, _) =>
+        {
+            if (_grid.SelectedRows.Count == 0) return;
+            var id = _grid.SelectedRows[0].Cells[".id"].Value?.ToString();
+
+            if (MessageBox.Show("Remover?", "Aviso", MessageBoxButtons.YesNo) == DialogResult.Yes)
+            {
+                await _svc.DeleteStaticEntryAsync(id!);
+                await LoadData();
+            }
+        };
+
+        tbar.Controls.AddRange(new Control[] { bA, bD });
+
+        _grid.Dock = DockStyle.Fill;
+        _grid.ReadOnly = true;
+        _grid.AllowUserToAddRows = false;
+        _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        _grid.BackgroundColor = Color.White;
+        _grid.RowHeadersVisible = false;
+
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", Visible = false });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "name", HeaderText = "Nome (Domínio)" });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "address", HeaderText = "IP Destino" });
+
+        Controls.Add(_grid);
+        Controls.Add(tbar);
+
+        Load += async (_, _) => await LoadData();
+    }
+
+    private async Task LoadData()
+    {
+        try
+        {
+            var l = await _svc.GetStaticEntriesAsync();
+            _grid.Rows.Clear();
+            foreach (var e in l)
+            {
+                _grid.Rows.Add(e.Id, e.Name, e.Address);
+            }
+        }
+        catch { }
     }
 }
 
 public class DnsStaticEditForm : Form
 {
     public DnsStaticEntry Entry { get; private set; } = new();
-    private readonly TextBox _tNom = new(), _tIp = new(), _tCom = new();
+
     public DnsStaticEditForm()
     {
-        Text = "DNS Estático"; Size = new Size(360, 240); StartPosition = FormStartPosition.CenterParent; FormBorderStyle = FormBorderStyle.FixedDialog; Font = new Font("Segoe UI", 9f);
-        void R(string l, Control c, int y) { Controls.Add(new Label { Text = l, Location = new Point(20, y + 3), AutoSize = true }); c.Location = new Point(130, y); c.Width = 180; Controls.Add(c); }
-        R("Domínio:", _tNom, 20); R("IP destino:", _tIp, 60); R("Comentário:", _tCom, 100);
-        var b = new Button { Text = "Adicionar", Location = new Point(130, 150), Width = 180, Height = 30, BackColor = Color.DodgerBlue, ForeColor = Color.White, FlatStyle = FlatStyle.Flat, DialogResult = DialogResult.OK };
-        b.Click += (s, e) => Entry = new DnsStaticEntry { Name = _tNom.Text, Address = _tIp.Text, Comment = _tCom.Text };
-        Controls.Add(b); AcceptButton = b;
+        Text = "DNS Estático";
+        Size = new Size(320, 180);
+        StartPosition = FormStartPosition.CenterParent;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        Font = new Font("Segoe UI", 9f);
+
+        var tN = new TextBox { Location = new Point(100, 20), Width = 180 };
+        Controls.Add(new Label { Text = "Domínio:", Location = new Point(20, 23) });
+
+        var tI = new TextBox { Location = new Point(100, 60), Width = 180 };
+        Controls.Add(new Label { Text = "IP Destino:", Location = new Point(20, 63) });
+
+        var b = new Button
+        {
+            Text = "Adicionar",
+            Location = new Point(100, 100),
+            Width = 180,
+            BackColor = Color.DodgerBlue,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            DialogResult = DialogResult.OK
+        };
+
+        b.Click += (_, _) =>
+        {
+            Entry = new DnsStaticEntry
+            {
+                Name = tN.Text,
+                Address = tI.Text
+            };
+        };
+
+        Controls.AddRange(new Control[] { tN, tI, b });
+        AcceptButton = b;
     }
 }
 
@@ -1011,12 +2305,19 @@ public class SystemPanel : BasePanel
         {
             if (MessageBox.Show("Tem a certeza que deseja reiniciar o router?", "Reboot", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
             {
-                try { await Client.RebootAsync(); MessageBox.Show("Reboot iniciado com sucesso."); }
-                catch (Exception ex) { ShowError(ex); }
+                try
+                {
+                    await Client.RebootAsync();
+                    MessageBox.Show("Reboot iniciado com sucesso.");
+                }
+                catch (Exception ex)
+                {
+                    ShowError(ex);
+                }
             }
         };
-        AddToolbarButton("↺ Atualizar Recursos", Color.FromArgb(0, 100, 180)).Click += async (_, _) => await LoadDataAsync();
 
+        AddToolbarButton("↺ Atualizar Recursos", Color.FromArgb(0, 100, 180)).Click += async (_, _) => await LoadDataAsync();
         Controls.Add(_contentPanel);
         _contentPanel.BringToFront();
     }
@@ -1026,7 +2327,6 @@ public class SystemPanel : BasePanel
         try
         {
             var res = await Client.GetSingleAsync<SystemResource>("system/resource");
-
             if (res != null)
             {
                 _contentPanel.Controls.Clear();
@@ -1037,207 +2337,268 @@ public class SystemPanel : BasePanel
                 _contentPanel.Controls.Add(new Label { Text = $"Free Memory: {res.FreeMemory / 1024 / 1024} MB / {res.TotalMemory / 1024 / 1024} MB", AutoSize = true, Font = new Font("Segoe UI", 10f) });
             }
         }
-        catch (Exception ex) { ShowError(ex); }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+        }
     }
 }
 
+public class MikroTikCloudSettings
+{
+    [JsonProperty("dns-name")]
+    public string DnsName { get; set; } = "";
+}
+
 // ════════════════════════════════════════════════════════════════════
-//  WIREGUARD PANEL - ATUALIZADO FINAL
+//  WIREGUARD PANEL
 // ════════════════════════════════════════════════════════════════════
 
 public class WireGuardPanel : BasePanel
 {
     private readonly WireGuardService _svc;
-    private readonly TabControl _innerTabs = new();
-    private readonly DataGridView _gridPeers = new();
-    private List<WireGuardInterface> _interfaces = new();
-
-    private readonly Button _btnQuickSetup;
-    private readonly Button _btnAddIf;
-    private readonly Button _btnAddPeer;
-    private readonly Button _btnExportConfig;
 
     public WireGuardPanel(MikroTikClient client) : base(client)
     {
         _svc = new WireGuardService(client);
-        Controls.Remove(Grid);
 
-        _innerTabs.Dock = DockStyle.Fill;
-        var tabIf = new TabPage("Interfaces WireGuard"); Grid.Dock = DockStyle.Fill; tabIf.Controls.Add(Grid);
-        var tabPeers = new TabPage("Peers"); StyleGrid(_gridPeers); _gridPeers.Dock = DockStyle.Fill; tabPeers.Controls.Add(_gridPeers);
-        _innerTabs.TabPages.AddRange(new[] { tabIf, tabPeers });
-
-        _innerTabs.SelectedIndexChanged += async (_, _) => {
-            bool isIfTab = _innerTabs.SelectedIndex == 0;
-            _btnQuickSetup.Visible = isIfTab;
-            _btnAddIf.Visible = isIfTab;
-            _btnAddPeer.Visible = !isIfTab;
-            _btnExportConfig.Visible = !isIfTab;
-            await LoadDataAsync();
-        };
-        Controls.Add(_innerTabs);
-        _innerTabs.BringToFront();
-
-        _btnQuickSetup = AddToolbarButton("⚡ Configuração Rápida (SDN)", Color.DarkOrange);
-        _btnQuickSetup.Click += async (_, _) => {
-            using var frm = new VpnQuickSetupForm();
+        AddToolbarButton("⚡ Configuração Rápida", Color.DarkOrange).Click += async (_, _) =>
+        {
+            using var frm = new VpnQuickSetupForm(Client);
             if (frm.ShowDialog() == DialogResult.OK)
             {
                 try
                 {
                     await _svc.SetupFullVpnAsync(frm.InterfaceName, frm.ListenPort, frm.Mtu, frm.NetworkIp, frm.PeerPublicKey, frm.PeerAllowedIp);
-
-                    var interfaces = await _svc.GetInterfacesAsync();
-                    var serverIf = interfaces.FirstOrDefault(i => i.Name == frm.InterfaceName);
-                    string serverPubKey = serverIf?.PublicKey ?? "ERRO_AO_OBTER_CHAVE";
+                    var ifs = await _svc.GetInterfacesAsync();
+                    var serverIf = ifs.FirstOrDefault(i => i.Name == frm.InterfaceName);
 
                     if (!string.IsNullOrWhiteSpace(frm.ClientPrivateKey))
                     {
-                        string configData = WireGuardService.GenerateClientConfig(
-                            new WireGuardPeer(), serverPubKey, Client.Host, frm.ListenPort,
-                            frm.ClientPrivateKey, frm.PeerAllowedIp, "8.8.8.8"
-                        );
-
-                        using var successFrm = new VpnSuccessForm(configData);
-                        successFrm.ShowDialog();
+                        string cfg = WireGuardService.GenerateClientConfig(new WireGuardPeer(), serverIf?.PublicKey ?? "", frm.Endpoint, frm.ListenPort, frm.ClientPrivateKey, frm.PeerAllowedIp, "8.8.8.8");
+                        using var sFrm = new VpnSuccessForm(cfg);
+                        sFrm.ShowDialog();
                     }
-                    else
-                    {
-                        MessageBox.Show("VPN Configurada com sucesso! (Sem geração de .conf porque inseriu chaves externas manualmente)", "Configuração Concluída");
-                    }
-
                     await LoadDataAsync();
                 }
-                catch (Exception ex) { ShowError(ex); }
+                catch (Exception ex)
+                {
+                    ShowError(ex);
+                }
             }
         };
 
-        _btnAddIf = AddToolbarButton("＋ Nova Interface", Color.FromArgb(0, 120, 215));
-        _btnAddIf.Click += async (_, _) => {
+        AddToolbarButton("＋ Nova Interface", Color.FromArgb(0, 120, 215)).Click += async (_, _) =>
+        {
             using var frm = new WgInterfaceEditForm();
-            if (frm.ShowDialog() == DialogResult.OK) { try { await _svc.CreateInterfaceAsync(frm.WgInterface); await LoadDataAsync(); } catch (Exception ex) { ShowError(ex); } }
-        };
-
-        _btnAddPeer = AddToolbarButton("＋ Novo Peer", Color.FromArgb(0, 140, 80));
-        _btnAddPeer.Visible = false;
-        _btnAddPeer.Click += async (_, _) => {
-            var interfacesParaPeer = await _svc.GetInterfacesAsync();
-            if (interfacesParaPeer.Count == 0)
-            {
-                MessageBox.Show("Não existem interfaces WireGuard. Crie uma interface primeiro.", "Aviso", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            using var frm = new WgPeerEditForm(interfacesParaPeer.Select(i => i.Name).ToList());
             if (frm.ShowDialog() == DialogResult.OK)
             {
                 try
                 {
-                    await _svc.AddPeerAsync(frm.Peer);
+                    await _svc.CreateInterfaceAsync(frm.WgInterface);
 
-                    if (!string.IsNullOrWhiteSpace(frm.GeneratedPrivateKey))
+                    if (!string.IsNullOrWhiteSpace(frm.NetworkIp))
                     {
-                        var serverIf = interfacesParaPeer.FirstOrDefault(i => i.Name == frm.Peer.Interface);
-                        string serverPubKey = serverIf?.PublicKey ?? "ERRO";
-                        string configData = WireGuardService.GenerateClientConfig(
-                            frm.Peer, serverPubKey, Client.Host, serverIf?.ListenPort ?? "51820",
-                            frm.GeneratedPrivateKey, frm.Peer.AllowedAddress, "8.8.8.8"
-                        );
+                        var ipSvc = new IpService(Client);
+                        await ipSvc.AddAddressAsync(new IpAddress { Address = frm.NetworkIp, Interface = frm.WgInterface.Name, Comment = "VPN Network" });
 
-                        using var successFrm = new VpnSuccessForm(configData);
-                        successFrm.ShowDialog();
+                        await Client.PutAsync<NatRule>("ip/firewall/nat", new NatRule
+                        {
+                            Chain = "srcnat",
+                            Action = "masquerade",
+                            SrcAddress = frm.NetworkIp,
+                            DstAddress = "0.0.0.0/0",
+                            Comment = "VPN Masquerade (" + frm.WgInterface.Name + ")"
+                        });
                     }
 
                     await LoadDataAsync();
                 }
-                catch (Exception ex) { ShowError(ex); }
+                catch (Exception ex)
+                {
+                    ShowError(ex);
+                }
             }
         };
 
-        AddToolbarButton("✕ Apagar", Color.FromArgb(180, 30, 30)).Click += async (_, _) => {
-            if (_innerTabs.SelectedIndex == 0)
+        AddToolbarButton("✕ Apagar Interface", Color.FromArgb(180, 30, 30)).Click += async (_, _) =>
+        {
+            var id = SelectedId();
+            if (id == null) return;
+            if (MessageBox.Show("Apagar Interface e TODOS os Peers?", "Aviso", MessageBoxButtons.YesNo) == DialogResult.Yes)
             {
-                var id = SelectedId();
-                if (id == null) { MessageBox.Show("Seleciona uma interface WireGuard."); return; }
-                if (MessageBox.Show("Aviso: Isto vai apagar a Interface e TODOS os Peers ligados a ela.\nDeseja continuar?", "Apagar Interface", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
-                try { await _svc.DeleteInterfaceAsync(id); await LoadDataAsync(); } catch (Exception ex) { ShowError(ex); }
-            }
-            else
-            {
-                if (_gridPeers.SelectedRows.Count == 0) { MessageBox.Show("Seleciona um peer."); return; }
-                var id = _gridPeers.SelectedRows[0].Cells[".id"].Value?.ToString();
-                if (id == null) return;
-                if (MessageBox.Show("Apagar este peer?", "Confirmar", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
-                try { await _svc.DeletePeerAsync(id); await LoadDataAsync(); } catch (Exception ex) { ShowError(ex); }
+                await _svc.DeleteInterfaceAsync(id);
+                await LoadDataAsync();
             }
         };
 
-        _btnExportConfig = AddToolbarButton("📄 Ver QR / Config", Color.FromArgb(80, 80, 140));
-        _btnExportConfig.Visible = false;
-        _btnExportConfig.Click += async (_, _) => {
-            if (_gridPeers.SelectedRows.Count == 0) { MessageBox.Show("Selecione um Peer na lista."); return; }
-
-            var ifaceName = _gridPeers.SelectedRows[0].Cells["interface"].Value?.ToString();
-            var allowedIp = _gridPeers.SelectedRows[0].Cells["allowed-address"].Value?.ToString();
-
-            var interfacesParaPeer = await _svc.GetInterfacesAsync();
-            using var frm = new WgClientConfigForm(interfacesParaPeer, ifaceName, allowedIp);
+        AddToolbarButton("👤 Gerir Peers (Clientes)", Color.SeaGreen).Click += async (_, _) =>
+        {
+            using var frm = new WireGuardPeersForm(_svc, Client);
             frm.ShowDialog();
+            await LoadDataAsync();
         };
 
         AddToolbarButton("↺ Atualizar", Color.FromArgb(0, 100, 180)).Click += async (_, _) => await LoadDataAsync();
 
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", HeaderText = "ID", Visible = false });
+        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", Visible = false });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "name", HeaderText = "Nome", FillWeight = 20 });
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "listen-port", HeaderText = "Porta", FillWeight = 15 });
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "public-key", HeaderText = "Chave Pública", FillWeight = 50 });
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "running", HeaderText = "Ativo", FillWeight = 10 });
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "disabled", HeaderText = "Disabled", FillWeight = 10 });
-
-        _gridPeers.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", HeaderText = "ID", Visible = false });
-        _gridPeers.Columns.Add(new DataGridViewTextBoxColumn { Name = "interface", HeaderText = "Interface", FillWeight = 15 });
-        _gridPeers.Columns.Add(new DataGridViewTextBoxColumn { Name = "public-key", HeaderText = "Chave Pública", FillWeight = 35 });
-        _gridPeers.Columns.Add(new DataGridViewTextBoxColumn { Name = "allowed-address", HeaderText = "Endereços Permitidos", FillWeight = 25 });
-        _gridPeers.Columns.Add(new DataGridViewTextBoxColumn { Name = "comment", HeaderText = "Nome / Comentário", FillWeight = 25 });
-    }
-
-    private static void StyleGrid(DataGridView g)
-    {
-        g.ReadOnly = true; g.AllowUserToAddRows = false; g.AllowUserToDeleteRows = false; g.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-        g.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill; g.BackgroundColor = Color.White; g.RowHeadersVisible = false; g.BorderStyle = BorderStyle.None; g.EnableHeadersVisualStyles = false;
-        g.ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle { BackColor = Color.FromArgb(40, 40, 40), ForeColor = Color.White, Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
+        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "port", HeaderText = "Porta", FillWeight = 15 });
+        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "pub", HeaderText = "Public Key", FillWeight = 50 });
     }
 
     protected override async Task LoadDataAsync()
     {
         try
         {
-            if (_innerTabs.SelectedIndex == 0)
+            var list = await _svc.GetInterfacesAsync();
+            Grid.Rows.Clear();
+            foreach (var i in list)
             {
-                _interfaces = await _svc.GetInterfacesAsync();
-                Grid.Rows.Clear();
-                foreach (var i in _interfaces) Grid.Rows.Add(i.Id, i.Name, i.ListenPort, i.PublicKey, i.Running ? "✔" : "✘", i.Disabled ? "Sim" : "Não");
-            }
-            else
-            {
-                var peers = await _svc.GetPeersAsync();
-                _gridPeers.Rows.Clear();
-                foreach (var p in peers) _gridPeers.Rows.Add(p.Id, p.Interface, p.PublicKey, p.AllowedAddress, p.Comment);
+                Grid.Rows.Add(i.Id, i.Name, i.ListenPort, i.PublicKey);
             }
         }
-        catch (Exception ex) { ShowError(ex); }
-    }
-
-    private async void BtnAddIf_Click(object? s, EventArgs e)
-    {
-        using var frm = new WgInterfaceEditForm();
-        if (frm.ShowDialog() != DialogResult.OK) return;
-        try { await _svc.CreateInterfaceAsync(frm.WgInterface); await LoadDataAsync(); }
-        catch (Exception ex) { ShowError(ex); }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+        }
     }
 }
 
-// ── Formulários Auxiliares Edit/Setup ────────────────────────────────
+public class WireGuardPeersForm : Form
+{
+    private readonly WireGuardService _svc;
+    private readonly MikroTikClient _client;
+    private readonly DataGridView _grid = new();
+
+    public WireGuardPeersForm(WireGuardService svc, MikroTikClient client)
+    {
+        _svc = svc;
+        _client = client;
+        Text = "Gestão de Peers WireGuard";
+        Size = new Size(600, 400);
+        StartPosition = FormStartPosition.CenterParent;
+        Font = new Font("Segoe UI", 9.5f);
+
+        var tbar = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 40,
+            Padding = new Padding(5)
+        };
+
+        var bAdd = new Button
+        {
+            Text = "＋ Novo Peer",
+            Height = 30,
+            BackColor = Color.DodgerBlue,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        bAdd.Click += async (_, _) =>
+        {
+            var ifs = await _svc.GetInterfacesAsync();
+            if (ifs.Count == 0) return;
+
+            var ipSvc = new IpService(client);
+            var allIps = await ipSvc.GetAddressesAsync();
+            var interfaceIps = new Dictionary<string, string>();
+            foreach (var i in ifs)
+            {
+                var ipObj = allIps.FirstOrDefault(a => a.Interface == i.Name);
+                interfaceIps[i.Name] = ipObj != null ? ipObj.Address : "";
+            }
+
+            using var f = new WgPeerEditForm(ifs.Select(i => i.Name).ToList(), _client, interfaceIps);
+            if (f.ShowDialog() == DialogResult.OK)
+            {
+                await _svc.AddPeerAsync(f.Peer);
+                if (!string.IsNullOrWhiteSpace(f.GeneratedPrivateKey))
+                {
+                    var sIf = ifs.FirstOrDefault(i => i.Name == f.Peer.Interface);
+                    string cfg = WireGuardService.GenerateClientConfig(f.Peer, sIf?.PublicKey ?? "", f.Endpoint, sIf?.ListenPort ?? "51820", f.GeneratedPrivateKey, f.Peer.AllowedAddress, "8.8.8.8");
+                    using var s = new VpnSuccessForm(cfg);
+                    s.ShowDialog();
+                }
+                await LoadData();
+            }
+        };
+
+        var bDel = new Button
+        {
+            Text = "✕ Apagar",
+            Height = 30,
+            BackColor = Color.Firebrick,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        bDel.Click += async (_, _) =>
+        {
+            if (_grid.SelectedRows.Count == 0) return;
+            var id = _grid.SelectedRows[0].Cells[".id"].Value?.ToString();
+
+            if (MessageBox.Show("Apagar?", "Aviso", MessageBoxButtons.YesNo) == DialogResult.Yes)
+            {
+                await _svc.DeletePeerAsync(id!);
+                await LoadData();
+            }
+        };
+
+        var bExp = new Button
+        {
+            Text = "📄 Ver QR",
+            Height = 30,
+            BackColor = Color.SlateBlue,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        bExp.Click += async (_, _) =>
+        {
+            if (_grid.SelectedRows.Count == 0) return;
+            var iface = _grid.SelectedRows[0].Cells["interface"].Value?.ToString();
+            var ip = _grid.SelectedRows[0].Cells["allowed-address"].Value?.ToString();
+            var pubKey = _grid.SelectedRows[0].Cells["public-key"].Value?.ToString();
+            var ifs = await _svc.GetInterfacesAsync();
+
+            using var f = new WgClientConfigForm(client, ifs, iface, ip, pubKey);
+            f.ShowDialog();
+        };
+
+        tbar.Controls.AddRange(new Control[] { bAdd, bDel, bExp });
+
+        _grid.Dock = DockStyle.Fill;
+        _grid.ReadOnly = true;
+        _grid.AllowUserToAddRows = false;
+        _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        _grid.BackgroundColor = Color.White;
+        _grid.RowHeadersVisible = false;
+
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", Visible = false });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "interface", HeaderText = "Interface" });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "public-key", HeaderText = "Public Key" });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "allowed-address", HeaderText = "IP Permitido" });
+
+        Controls.Add(_grid);
+        Controls.Add(tbar);
+
+        Load += async (_, _) => await LoadData();
+    }
+
+    private async Task LoadData()
+    {
+        try
+        {
+            var l = await _svc.GetPeersAsync();
+            _grid.Rows.Clear();
+            foreach (var p in l)
+            {
+                _grid.Rows.Add(p.Id, p.Interface, p.PublicKey, p.AllowedAddress);
+            }
+        }
+        catch { }
+    }
+}
 
 public class VpnQuickSetupForm : Form
 {
@@ -1247,6 +2608,7 @@ public class VpnQuickSetupForm : Form
     public string NetworkIp => _txtNetwork.Text.Trim();
     public string PeerPublicKey => _txtPeerPubKey.Text.Trim();
     public string PeerAllowedIp => _txtPeerIp.Text.Trim();
+    public string Endpoint => _txtEndpoint.Text.Trim();
     public string ClientPrivateKey { get; private set; } = "";
 
     private readonly TextBox _txtName = new();
@@ -1255,126 +2617,276 @@ public class VpnQuickSetupForm : Form
     private readonly TextBox _txtNetwork = new();
     private readonly TextBox _txtPeerPubKey = new();
     private readonly TextBox _txtPeerIp = new();
+    private readonly TextBox _txtEndpoint = new();
 
-    public VpnQuickSetupForm()
+    public VpnQuickSetupForm(MikroTikClient client)
     {
-        Text = "Configuração Rápida WireGuard SDN";
-        Size = new Size(420, 360);
+        Text = "Setup VPN";
+        Size = new Size(480, 420);
+        StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
-        MaximizeBox = false; StartPosition = FormStartPosition.CenterParent; Font = new Font("Segoe UI", 9.5f);
+        MaximizeBox = false;
+        Font = new Font("Segoe UI", 9f);
 
-        int y = 18;
-        void Row(string lbl, Control ctrl)
+        int y = 20;
+
+        Controls.Add(new Label { Text = "Nome:", Location = new Point(20, y + 3), AutoSize = true });
+        _txtName.Location = new Point(150, y);
+        _txtName.Width = 200;
+        Controls.Add(_txtName);
+        y += 35;
+
+        Controls.Add(new Label { Text = "Porta:", Location = new Point(20, y + 3), AutoSize = true });
+        _txtPort.Location = new Point(150, y);
+        _txtPort.Width = 200;
+        Controls.Add(_txtPort);
+        y += 35;
+
+        Controls.Add(new Label { Text = "MTU:", Location = new Point(20, y + 3), AutoSize = true });
+        _txtMtu.Location = new Point(150, y);
+        _txtMtu.Width = 200;
+        Controls.Add(_txtMtu);
+        y += 35;
+
+        Controls.Add(new Label { Text = "Rede VPN:", Location = new Point(20, y + 3), AutoSize = true });
+        _txtNetwork.Location = new Point(150, y);
+        _txtNetwork.Width = 200;
+        Controls.Add(_txtNetwork);
+        y += 35;
+
+        Controls.Add(new Label { Text = "IP Peer:", Location = new Point(20, y + 3), AutoSize = true });
+        _txtPeerIp.Location = new Point(150, y);
+        _txtPeerIp.Width = 200;
+        Controls.Add(_txtPeerIp);
+        y += 35;
+
+        Controls.Add(new Label { Text = "Public Key Peer:", Location = new Point(20, y + 3), AutoSize = true });
+        _txtPeerPubKey.Location = new Point(150, y);
+        _txtPeerPubKey.Width = 200;
+        Controls.Add(_txtPeerPubKey);
+        y += 35;
+
+        Controls.Add(new Label { Text = "Endpoint:", Location = new Point(20, y + 3), AutoSize = true });
+        _txtEndpoint.Location = new Point(150, y);
+        _txtEndpoint.Width = 200;
+        Controls.Add(_txtEndpoint);
+
+        var btnDdns = new Button
         {
-            Controls.Add(new Label { Text = lbl, Location = new Point(14, y + 3), AutoSize = true });
-            ctrl.Location = new Point(160, y); ((Control)ctrl).Width = 220; Controls.Add(ctrl); y += 35;
-        }
-
-        Row("Nome da Interface:", _txtName);
-        Row("Listen Port:", _txtPort);
-        Row("MTU:", _txtMtu);
-        Row("Rede VPN (CIDR):", _txtNetwork);
-        Row("IP do Peer:", _txtPeerIp);
-        Row("Pub. Key do Peer:", _txtPeerPubKey);
-
-        var btnAuto = new Button { Text = "🔑 Gerar Par de Chaves", Location = new Point(14, y + 10), Size = new Size(366, 30), BackColor = Color.FromArgb(40, 160, 100), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
-        btnAuto.FlatAppearance.BorderSize = 0;
-        btnAuto.Click += (_, _) => {
-            var keys = WireGuardKeyGen.Generate();
-            ClientPrivateKey = keys.PrivateKey;
-            _txtPeerPubKey.Text = keys.PublicKey;
-            MessageBox.Show("Chaves geradas matematicamente!\n\nA Chave Pública do Peer foi preenchida acima. A Chave Privada do Cliente será usada internamente para gerar o QR Code se avançar.", "Sucesso", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            Text = "☁️ DDNS",
+            Location = new Point(360, y),
+            Size = new Size(80, 25),
+            BackColor = Color.LightGray,
+            FlatStyle = FlatStyle.Flat
         };
-        Controls.Add(btnAuto);
-
-        y += 50;
-        var btnOk = new Button { Text = "Executar Setup", Location = new Point(14, y), Size = new Size(366, 30), BackColor = Color.FromArgb(0, 120, 215), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
-        btnOk.FlatAppearance.BorderSize = 0;
-        btnOk.Click += (_, _) => {
-            if (string.IsNullOrWhiteSpace(_txtName.Text) || string.IsNullOrWhiteSpace(_txtPeerPubKey.Text)) { MessageBox.Show("Preencha os campos obrigatórios (ou utilize o gerador de chaves)."); return; }
-            DialogResult = DialogResult.OK; Close();
+        btnDdns.FlatAppearance.BorderSize = 0;
+        btnDdns.Click += async (s, e) =>
+        {
+            try
+            {
+                var cloud = await client.GetSingleAsync<MikroTikCloudSettings>("ip/cloud");
+                if (cloud != null && !string.IsNullOrEmpty(cloud.DnsName)) _txtEndpoint.Text = cloud.DnsName;
+                else MessageBox.Show("DDNS não está ativado no router (IP > Cloud).", "Aviso");
+            }
+            catch { MessageBox.Show("Erro ao obter DDNS.", "Erro"); }
         };
-        Controls.Add(btnOk); AcceptButton = btnOk;
+        Controls.Add(btnDdns);
+        y += 35;
+
+        var btnK = new Button
+        {
+            Text = "🔑 Gerar Chave",
+            Location = new Point(150, y),
+            Width = 200,
+            BackColor = Color.SeaGreen,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        btnK.Click += (s, e) =>
+        {
+            var k = WireGuardKeyGen.Generate();
+            ClientPrivateKey = k.PrivateKey;
+            _txtPeerPubKey.Text = k.PublicKey;
+        };
+        Controls.Add(btnK);
+        y += 40;
+
+        var btnO = new Button
+        {
+            Text = "Executar",
+            Location = new Point(150, y),
+            Width = 200,
+            Height = 35,
+            BackColor = Color.DodgerBlue,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            DialogResult = DialogResult.OK
+        };
+        btnO.Click += (_, _) =>
+        {
+            if (!string.IsNullOrWhiteSpace(ClientPrivateKey))
+            {
+                WireGuardKeyStore.Save(_txtPeerPubKey.Text, ClientPrivateKey);
+            }
+        };
+
+        Controls.Add(btnO);
+
+        _txtName.Text = "wg-vpn";
+        _txtPort.Text = "51820";
+        _txtMtu.Text = "1420";
+        _txtEndpoint.Text = client.Host;
+
+        AcceptButton = btnO;
     }
 }
 
 public class VpnSuccessForm : Form
 {
-    public VpnSuccessForm(string configData)
+    public VpnSuccessForm(string data)
     {
-        Text = "VPN Pronta! Configuração do Cliente";
+        Text = "Configuração Gerada";
         Size = new Size(540, 480);
         StartPosition = FormStartPosition.CenterParent;
-        Font = new Font("Segoe UI", 9.5f);
 
-        var lbl = new Label { Text = "O seu servidor está pronto. Importe a configuração abaixo no seu cliente:", Location = new Point(20, 15), AutoSize = true, Font = new Font("Segoe UI", 10f, FontStyle.Bold) };
-        Controls.Add(lbl);
+        var t = new TextBox
+        {
+            Location = new Point(20, 40),
+            Size = new Size(240, 320),
+            Multiline = true,
+            ReadOnly = true,
+            Text = data,
+            Font = new Font("Consolas", 8f)
+        };
 
-        var txtOutput = new TextBox { Location = new Point(20, 45), Size = new Size(240, 320), Multiline = true, ReadOnly = true, Font = new Font("Consolas", 9f), ScrollBars = ScrollBars.Vertical, Text = configData };
-        Controls.Add(txtOutput);
+        var p = new PictureBox
+        {
+            Location = new Point(270, 40),
+            Size = new Size(230, 230),
+            SizeMode = PictureBoxSizeMode.Zoom,
+            BorderStyle = BorderStyle.FixedSingle
+        };
 
-        var pbQr = new PictureBox { Location = new Point(270, 45), Size = new Size(230, 230), SizeMode = PictureBoxSizeMode.Zoom, BorderStyle = BorderStyle.FixedSingle };
-        Controls.Add(pbQr);
-
-        System.Net.ServicePointManager.SecurityProtocol |= System.Net.SecurityProtocolType.Tls12;
-        Task.Run(async () => {
+        Task.Run(async () =>
+        {
             try
             {
-                using var http = new System.Net.Http.HttpClient();
-                string url = $"https://api.qrserver.com/v1/create-qr-code/?size=250x250&data={Uri.EscapeDataString(configData)}";
-                var imageBytes = await http.GetByteArrayAsync(url);
-                pbQr.Invoke(new Action(() => {
-                    using var ms = new System.IO.MemoryStream(imageBytes);
-                    pbQr.Image = new Bitmap(ms);
+                using var h = new System.Net.Http.HttpClient();
+                var b = await h.GetByteArrayAsync($"https://api.qrserver.com/v1/create-qr-code/?size=250x250&data={Uri.EscapeDataString(data)}");
+                p.Invoke(new Action(() =>
+                {
+                    using var m = new System.IO.MemoryStream(b);
+                    p.Image = new Bitmap(m);
                 }));
             }
             catch { }
         });
 
-        var btnSave = new Button { Text = "💾 Guardar Ficheiro .conf", Location = new Point(20, 380), Size = new Size(200, 35), BackColor = Color.FromArgb(0, 140, 60), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
-        btnSave.FlatAppearance.BorderSize = 0;
-        btnSave.Click += (_, _) => {
-            using var dlg = new SaveFileDialog { Filter = "WireGuard Config|*.conf", FileName = "wg-client.conf" };
-            if (dlg.ShowDialog() == DialogResult.OK) File.WriteAllText(dlg.FileName, configData);
+        var bS = new Button
+        {
+            Text = "💾 Guardar .conf",
+            Location = new Point(20, 380),
+            Width = 200,
+            Height = 35,
+            BackColor = Color.SeaGreen,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
         };
-        Controls.Add(btnSave);
+        bS.Click += (s, e) =>
+        {
+            var d = new SaveFileDialog { Filter = "Config|*.conf" };
+            if (d.ShowDialog() == DialogResult.OK)
+            {
+                File.WriteAllText(d.FileName, data);
+            }
+        };
 
-        var btnClose = new Button { Text = "Fechar", Location = new Point(400, 380), Size = new Size(100, 35), FlatStyle = FlatStyle.Flat };
-        btnClose.Click += (_, _) => Close();
-        Controls.Add(btnClose);
+        Controls.AddRange(new Control[] { t, p, bS });
     }
 }
 
 public class WgInterfaceEditForm : Form
 {
     public WireGuardInterface WgInterface { get; private set; } = new();
-    private readonly TextBox _txtName = new(), _txtPort = new(), _txtComment = new();
+    public string NetworkIp => _txtNetwork.Text.Trim();
+
+    private readonly TextBox _txtName = new();
+    private readonly TextBox _txtPort = new();
+    private readonly TextBox _txtNetwork = new();
+    private readonly TextBox _txtComment = new();
 
     public WgInterfaceEditForm()
     {
-        Text = "Nova Interface WireGuard"; Size = new Size(340, 210);
-        FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false;
-        StartPosition = FormStartPosition.CenterParent; Font = new Font("Segoe UI", 9.5f);
+        Text = "Nova Interface";
+        Size = new Size(340, 290);
+        StartPosition = FormStartPosition.CenterParent;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        Font = new Font("Segoe UI", 9.5f);
+
+        int y = 20;
+
+        Controls.Add(new Label { Text = "Nome:", Location = new Point(20, y + 3), AutoSize = true });
+        _txtName.Location = new Point(120, y);
+        _txtName.Width = 185;
+        Controls.Add(_txtName);
+        y += 38;
+
+        Controls.Add(new Label { Text = "Porta:", Location = new Point(20, y + 3), AutoSize = true });
+        _txtPort.Location = new Point(120, y);
+        _txtPort.Width = 185;
         _txtPort.Text = "13231";
+        Controls.Add(_txtPort);
+        y += 38;
 
-        int y = 18;
-        void Row(string lbl, TextBox tb)
+        Controls.Add(new Label { Text = "Rede (CIDR):", Location = new Point(20, y + 3), AutoSize = true });
+        _txtNetwork.Location = new Point(120, y);
+        _txtNetwork.Width = 185;
+        Controls.Add(_txtNetwork);
+        y += 24;
+
+        var hint = new Label { Text = "Ex: 10.253.0.1/24 (Cria IP e regra NAT)", Location = new Point(120, y), AutoSize = true, ForeColor = Color.Gray, Font = new Font("Segoe UI", 8f) };
+        Controls.Add(hint);
+        y += 22;
+
+        Controls.Add(new Label { Text = "Comentário:", Location = new Point(20, y + 3), AutoSize = true });
+        _txtComment.Location = new Point(120, y);
+        _txtComment.Width = 185;
+        Controls.Add(_txtComment);
+        y += 38;
+
+        var b = new Button
         {
-            Controls.Add(new Label { Text = lbl, Location = new Point(14, y + 3), AutoSize = true });
-            tb.Location = new Point(120, y); tb.Width = 185; Controls.Add(tb); y += 38;
-        }
-        Row("Nome:", _txtName); Row("Porta:", _txtPort); Row("Comentário:", _txtComment);
-
-        Controls.Add(new Label { Text = "💡 A chave privada é gerada automaticamente pelo RouterOS.", Location = new Point(14, y), AutoSize = true, ForeColor = Color.Gray, Font = new Font("Segoe UI", 8f) });
-
-        var ok = new Button { Text = "Criar", Location = new Point(120, y + 22), Size = new Size(85, 28), BackColor = Color.FromArgb(0, 120, 215), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
-        ok.FlatAppearance.BorderSize = 0;
-        ok.Click += (_, _) => {
-            if (string.IsNullOrWhiteSpace(_txtName.Text)) { MessageBox.Show("Nome obrigatório."); return; }
-            WgInterface = new WireGuardInterface { Name = _txtName.Text.Trim(), ListenPort = _txtPort.Text.Trim(), Comment = _txtComment.Text };
-            DialogResult = DialogResult.OK; Close();
+            Text = "Criar Interface",
+            Location = new Point(120, y),
+            Size = new Size(185, 30),
+            BackColor = Color.FromArgb(0, 120, 215),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
         };
-        Controls.Add(ok); AcceptButton = ok;
+        b.FlatAppearance.BorderSize = 0;
+
+        b.Click += (s, e) =>
+        {
+            if (string.IsNullOrWhiteSpace(_txtName.Text))
+            {
+                MessageBox.Show("Nome obrigatório.");
+                return;
+            }
+
+            WgInterface = new WireGuardInterface
+            {
+                Name = _txtName.Text.Trim(),
+                ListenPort = _txtPort.Text.Trim(),
+                Comment = _txtComment.Text.Trim()
+            };
+
+            DialogResult = DialogResult.OK;
+            Close();
+        };
+
+        Controls.Add(b);
+        AcceptButton = b;
     }
 }
 
@@ -1382,107 +2894,238 @@ public class WgPeerEditForm : Form
 {
     public WireGuardPeer Peer { get; private set; } = new();
     public string GeneratedPrivateKey { get; private set; } = "";
+    public string Endpoint => _txtEndpoint.Text.Trim();
 
-    private readonly ComboBox _cboInterface = new();
-    private readonly TextBox _txtPublicKey = new(), _txtAllowedAddr = new(), _txtName = new();
+    private readonly TextBox _tNo = new();
+    private readonly TextBox _tPu = new();
+    private readonly TextBox _tIp = new();
+    private readonly ComboBox _cI = new();
+    private readonly TextBox _txtEndpoint = new();
 
-    public WgPeerEditForm(List<string> interfaces)
+    public WgPeerEditForm(List<string> ifs, MikroTikClient client, Dictionary<string, string> interfaceIps)
     {
-        Text = "Novo Peer (Cliente)"; Size = new Size(420, 320); StartPosition = FormStartPosition.CenterParent;
-        FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false; Font = new Font("Segoe UI", 9.5f);
-
-        _cboInterface.DropDownStyle = ComboBoxStyle.DropDownList;
-        interfaces.ForEach(i => _cboInterface.Items.Add(i));
-        if (_cboInterface.Items.Count > 0) _cboInterface.SelectedIndex = 0;
+        Text = "Novo Peer (Cliente)";
+        Size = new Size(500, 420);
+        StartPosition = FormStartPosition.CenterParent;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        Font = new Font("Segoe UI", 9.5f);
 
         int y = 20;
-        void Row(string lbl, Control ctrl)
-        {
-            Controls.Add(new Label { Text = lbl, Location = new Point(20, y + 3), AutoSize = true });
-            ctrl.Location = new Point(180, y); ctrl.Width = 200; Controls.Add(ctrl); y += 40;
-        }
 
-        Row("Nome (Opcional):", _txtName);
-        Row("Chave Pública do Cliente:", _txtPublicKey);
-
-        var btnGen = new Button { Text = "🔑 Gerar", Location = new Point(180, y), Width = 200, BackColor = Color.FromArgb(40, 160, 100), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
-        btnGen.FlatAppearance.BorderSize = 0;
-        btnGen.Click += (s, e) => {
-            var keys = WireGuardKeyGen.Generate();
-            GeneratedPrivateKey = keys.PrivateKey;
-            _txtPublicKey.Text = keys.PublicKey;
-            MessageBox.Show($"Chaves geradas internamente.\n\nO ficheiro e QR Code serão disponibilizados ao clicar em Adicionar.", "Sucesso", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        };
-        Controls.Add(btnGen);
+        Controls.Add(new Label { Text = "Nome:", Location = new Point(20, y + 3), AutoSize = true });
+        _tNo.Location = new Point(180, y);
+        _tNo.Width = 200;
+        Controls.Add(_tNo);
         y += 40;
 
-        Row("Allowed Address (IP/32):", _txtAllowedAddr);
-        Row("Interface do Servidor:", _cboInterface);
+        Controls.Add(new Label { Text = "Public Key:", Location = new Point(20, y + 3), AutoSize = true });
+        _tPu.Location = new Point(180, y);
+        _tPu.Width = 200;
+        Controls.Add(_tPu);
+        y += 40;
 
-        var btnOk = new Button { Text = "Adicionar Peer", Location = new Point(180, y + 10), Width = 200, BackColor = Color.FromArgb(0, 120, 215), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
-        btnOk.FlatAppearance.BorderSize = 0;
-        btnOk.Click += (s, e) => {
-            if (string.IsNullOrWhiteSpace(_txtPublicKey.Text) || string.IsNullOrWhiteSpace(_txtAllowedAddr.Text)) return;
+        var bK = new Button
+        {
+            Text = "🔑 Gerar",
+            Location = new Point(180, y),
+            Width = 200,
+            BackColor = Color.SeaGreen,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        bK.FlatAppearance.BorderSize = 0;
+        bK.Click += (s, e) =>
+        {
+            var k = WireGuardKeyGen.Generate();
+            GeneratedPrivateKey = k.PrivateKey;
+            _tPu.Text = k.PublicKey;
+        };
+        Controls.Add(bK);
+        y += 45;
+
+        Controls.Add(new Label { Text = "IP Cliente:", Location = new Point(20, y + 3), AutoSize = true });
+        _tIp.Location = new Point(180, y);
+        _tIp.Width = 200;
+        Controls.Add(_tIp);
+        y += 26;
+
+        var hintLbl = new Label
+        {
+            Text = "💡 Indique o IP do cliente com /32.",
+            Location = new Point(180, y),
+            AutoSize = true,
+            ForeColor = Color.Gray,
+            Font = new Font("Segoe UI", 8f)
+        };
+        Controls.Add(hintLbl);
+        y += 35;
+
+        Controls.Add(new Label { Text = "Interface:", Location = new Point(20, y + 3), AutoSize = true });
+        _cI.Location = new Point(180, y);
+        _cI.Width = 200;
+        foreach (var i in ifs) _cI.Items.Add(i);
+        _cI.DropDownStyle = ComboBoxStyle.DropDownList;
+
+        _cI.SelectedIndexChanged += (s, e) =>
+        {
+            string selectedIf = _cI.Text;
+            if (interfaceIps.TryGetValue(selectedIf, out string ipCidr) && !string.IsNullOrWhiteSpace(ipCidr))
+            {
+                string baseIp = ipCidr.Split('/')[0];
+                int lastDot = baseIp.LastIndexOf('.');
+                string baseNet = lastDot > 0 ? baseIp.Substring(0, lastDot + 1) : "10.0.0.";
+                hintLbl.Text = $"💡 IP Servidor: {ipCidr}\nEx: {baseNet}2/32 (Tem de pertencer à rede)";
+            }
+            else
+            {
+                hintLbl.Text = $"💡 Indique o IP do cliente com /32.\n(A interface {selectedIf} não tem IP configurado)";
+            }
+        };
+
+        if (_cI.Items.Count > 0) _cI.SelectedIndex = 0;
+        Controls.Add(_cI);
+        y += 40;
+
+        Controls.Add(new Label { Text = "Endpoint Servidor:", Location = new Point(20, y + 3), AutoSize = true });
+        _txtEndpoint.Location = new Point(180, y);
+        _txtEndpoint.Width = 200;
+        _txtEndpoint.Text = client.Host;
+        Controls.Add(_txtEndpoint);
+
+        var btnDdns = new Button
+        {
+            Text = "☁️ DDNS",
+            Location = new Point(390, y),
+            Width = 80,
+            Height = 25,
+            BackColor = Color.LightGray,
+            FlatStyle = FlatStyle.Flat
+        };
+        btnDdns.FlatAppearance.BorderSize = 0;
+        btnDdns.Click += async (s, e) =>
+        {
+            try
+            {
+                var cloud = await client.GetSingleAsync<MikroTikCloudSettings>("ip/cloud");
+                if (cloud != null && !string.IsNullOrEmpty(cloud.DnsName)) _txtEndpoint.Text = cloud.DnsName;
+                else MessageBox.Show("DDNS inativo no router.");
+            }
+            catch { MessageBox.Show("Erro ao obter DDNS."); }
+        };
+        Controls.Add(btnDdns);
+        y += 40;
+
+        var bO = new Button
+        {
+            Text = "Adicionar Peer",
+            Location = new Point(180, y),
+            Width = 200,
+            BackColor = Color.DodgerBlue,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        bO.FlatAppearance.BorderSize = 0;
+        bO.Click += (s, e) =>
+        {
+            if (!string.IsNullOrWhiteSpace(GeneratedPrivateKey))
+            {
+                WireGuardKeyStore.Save(_tPu.Text, GeneratedPrivateKey);
+            }
+
             Peer = new WireGuardPeer
             {
-                Interface = _cboInterface.Text,
-                PublicKey = _txtPublicKey.Text,
-                AllowedAddress = _txtAllowedAddr.Text,
-                Comment = _txtName.Text
+                Interface = _cI.Text,
+                PublicKey = _tPu.Text,
+                AllowedAddress = _tIp.Text,
+                Comment = _tNo.Text
             };
-            DialogResult = DialogResult.OK; Close();
+            DialogResult = DialogResult.OK;
+            Close();
         };
-        Controls.Add(btnOk); AcceptButton = btnOk;
+
+        Controls.Add(bO);
+        AcceptButton = bO;
     }
 }
 
 public class WgClientConfigForm : Form
 {
-    public WgClientConfigForm(List<WireGuardInterface> interfaces, string? prefillInterface = null, string? prefillIp = null)
+    public WgClientConfigForm(MikroTikClient client, List<WireGuardInterface> ifs, string? sI, string? sIp, string? peerPubKey)
     {
-        Text = "Exportar Configuração para Peer Existente"; Size = new Size(560, 360);
-        FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false; StartPosition = FormStartPosition.CenterParent; Font = new Font("Segoe UI", 9.5f);
+        Text = "Configuração QR";
+        Size = new Size(560, 350);
+        StartPosition = FormStartPosition.CenterParent;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
 
-        var cboIf = new ComboBox { Location = new Point(220, 14), Width = 300, DropDownStyle = ComboBoxStyle.DropDownList };
-        interfaces.ForEach(i => cboIf.Items.Add(i.Name));
+        var cbo = new ComboBox
+        {
+            Location = new Point(180, 20),
+            Width = 250,
+            DataSource = ifs.Select(x => x.Name).ToList(),
+            DropDownStyle = ComboBoxStyle.DropDownList
+        };
+        if (sI != null && cbo.Items.Contains(sI)) cbo.SelectedItem = sI;
+        else if (cbo.Items.Count > 0) cbo.SelectedIndex = 0;
 
-        if (prefillInterface != null && cboIf.Items.Contains(prefillInterface))
-            cboIf.SelectedItem = prefillInterface;
-        else if (cboIf.Items.Count > 0) cboIf.SelectedIndex = 0;
+        var tK = new TextBox { Location = new Point(180, 60), Width = 250 };
 
-        var txtClientPrivKey = new TextBox { Location = new Point(220, 52), Width = 300 };
-        var txtClientAddr = new TextBox { Location = new Point(220, 90), Width = 300 };
-        var txtEndpoint = new TextBox { Location = new Point(220, 128), Width = 300 };
-        var txtDns = new TextBox { Location = new Point(220, 166), Width = 300, Text = "8.8.8.8" };
+        if (peerPubKey != null)
+        {
+            tK.Text = WireGuardKeyStore.GetPrivateKey(peerPubKey) ?? "";
+        }
 
-        if (prefillIp != null) txtClientAddr.Text = prefillIp;
+        var tE = new TextBox { Location = new Point(180, 100), Width = 250 };
+        tE.Text = client.Host;
 
-        int y = 14;
-        void Lbl(string t, int ly) => Controls.Add(new Label { Text = t, Location = new Point(20, ly + 3), AutoSize = true });
-        Lbl("Interface associada:", y); Controls.Add(cboIf);
-        y += 38; Lbl("Cole a Chave Privada do Cliente:", y); Controls.Add(txtClientPrivKey);
-        y += 38; Lbl("Endereço (Allowed IP):", y); Controls.Add(txtClientAddr);
-        y += 38; Lbl("Endpoint do Servidor (IP Público):", y); Controls.Add(txtEndpoint);
-        y += 38; Lbl("DNS do Cliente:", y); Controls.Add(txtDns);
+        Controls.Add(new Label { Text = "Interface:", Location = new Point(20, 23), AutoSize = true });
+        Controls.Add(new Label { Text = "Chave Privada Cliente:", Location = new Point(20, 63), AutoSize = true });
+        Controls.Add(new Label { Text = "Endpoint Servidor:", Location = new Point(20, 103), AutoSize = true });
 
-        var lblAviso = new Label { Text = "⚠️ O MikroTik não guarda a Chave Privada. Se a perdeu, gere um Peer novo.", Location = new Point(20, y + 45), AutoSize = true, ForeColor = Color.Gray, MaximumSize = new Size(500, 0) };
-        Controls.Add(lblAviso);
+        var btnDdns = new Button
+        {
+            Text = "☁️ DDNS",
+            Location = new Point(440, 100),
+            Width = 80,
+            Height = 25,
+            BackColor = Color.LightGray,
+            FlatStyle = FlatStyle.Flat
+        };
+        btnDdns.FlatAppearance.BorderSize = 0;
+        btnDdns.Click += async (s, e) =>
+        {
+            try
+            {
+                var cloud = await client.GetSingleAsync<MikroTikCloudSettings>("ip/cloud");
+                if (cloud != null && !string.IsNullOrEmpty(cloud.DnsName)) tE.Text = cloud.DnsName;
+                else MessageBox.Show("DDNS não está ativado no router.");
+            }
+            catch { MessageBox.Show("Erro ao obter DDNS."); }
+        };
+        Controls.Add(btnDdns);
 
-        var btnGen = new Button { Text = "Gerar QR / Ficheiro .conf", Location = new Point(220, y + 95), Size = new Size(300, 32), BackColor = Color.FromArgb(0, 120, 215), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
-        btnGen.FlatAppearance.BorderSize = 0;
-        btnGen.Click += (_, _) => {
-            if (string.IsNullOrWhiteSpace(txtClientPrivKey.Text) || string.IsNullOrWhiteSpace(txtEndpoint.Text))
-            { MessageBox.Show("Preencha a Chave Privada e o Endpoint do Servidor!"); return; }
+        var btn = new Button
+        {
+            Text = "Gerar QR Code",
+            Location = new Point(180, 150),
+            Width = 250,
+            Height = 40,
+            BackColor = Color.DodgerBlue,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        btn.Click += (s, e) =>
+        {
+            var i = ifs.FirstOrDefault(x => x.Name == cbo.Text);
+            if (i == null || string.IsNullOrWhiteSpace(tK.Text)) return;
 
-            var iface = interfaces.FirstOrDefault(i => i.Name == cboIf.Text);
-            if (iface == null) return;
-
-            string cfg = WireGuardService.GenerateClientConfig(new WireGuardPeer(), iface.PublicKey, txtEndpoint.Text, iface.ListenPort, txtClientPrivKey.Text, txtClientAddr.Text, txtDns.Text);
-
-            using var successFrm = new VpnSuccessForm(cfg);
-            successFrm.ShowDialog();
+            string c = WireGuardService.GenerateClientConfig(new WireGuardPeer(), i.PublicKey, tE.Text, i.ListenPort, tK.Text, sIp ?? "");
+            using var f = new VpnSuccessForm(c);
+            f.ShowDialog();
             Close();
         };
-        Controls.Add(btnGen);
+
+        Controls.AddRange(new Control[] { cbo, tK, tE, btn });
     }
 }
