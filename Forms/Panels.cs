@@ -25,44 +25,60 @@ public static class WireGuardKeyGen
     }
 }
 
-// ── Cofre Local para guardar Chaves Privadas ────────────────────────
+// ── Cofre Local para guardar Chaves Privadas (1 Ficheiro por Router) 
 public static class WireGuardKeyStore
 {
-    private const string FilePath = "wg_keys.json";
-    private static Dictionary<string, string> _keys = new();
-
-    static WireGuardKeyStore()
+    private static string GetFilePath(string host)
     {
-        Load();
+        var safeHost = string.Join("_", host.Split(Path.GetInvalidFileNameChars()));
+        return $"wg_keys_{safeHost}.json";
     }
 
-    public static void Load()
+    public static void Save(string host, string publicKey, string privateKey)
     {
-        if (File.Exists(FilePath))
+        if (string.IsNullOrWhiteSpace(host) || string.IsNullOrWhiteSpace(publicKey) || string.IsNullOrWhiteSpace(privateKey)) return;
+
+        var path = GetFilePath(host);
+        var keys = new Dictionary<string, string>();
+
+        if (File.Exists(path))
         {
             try
             {
-                var json = File.ReadAllText(FilePath);
-                _keys = JsonConvert.DeserializeObject<Dictionary<string, string>>(json) ?? new();
+                var json = File.ReadAllText(path);
+                keys = JsonConvert.DeserializeObject<Dictionary<string, string>>(json) ?? new();
             }
             catch { }
         }
-    }
 
-    public static void Save(string publicKey, string privateKey)
-    {
-        if (string.IsNullOrWhiteSpace(publicKey) || string.IsNullOrWhiteSpace(privateKey)) return;
-        _keys[publicKey] = privateKey;
+        keys[publicKey] = privateKey;
+
         try
         {
-            File.WriteAllText(FilePath, JsonConvert.SerializeObject(_keys, Formatting.Indented));
+            File.WriteAllText(path, JsonConvert.SerializeObject(keys, Formatting.Indented));
         }
         catch { }
     }
 
-    public static string? GetPrivateKey(string publicKey)
+    public static string? GetPrivateKey(string host, string publicKey)
     {
-        return _keys.TryGetValue(publicKey, out var priv) ? priv : null;
+        if (string.IsNullOrWhiteSpace(host) || string.IsNullOrWhiteSpace(publicKey)) return null;
+
+        var path = GetFilePath(host);
+        if (!File.Exists(path)) return null;
+
+        try
+        {
+            var json = File.ReadAllText(path);
+            var keys = JsonConvert.DeserializeObject<Dictionary<string, string>>(json);
+            if (keys != null && keys.TryGetValue(publicKey, out var priv))
+            {
+                return priv;
+            }
+        }
+        catch { }
+
+        return null;
     }
 }
 // ──────────────────────────────────────────────────────────────────
@@ -407,9 +423,6 @@ public class WirelessEditForm : Form
     }
 }
 
-// ---------------------------------------------------------------------------------
-// PERFIS DE SEGURANÇA (Com layout WinBox Completo)
-// ---------------------------------------------------------------------------------
 public class SecurityProfilesForm : Form
 {
     private readonly WirelessService _svc;
@@ -473,7 +486,6 @@ public class SecurityProfilesForm : Form
 
             try
             {
-                // Obter o perfil completo para preencher os vistos corretamente
                 var allProfs = await _svc.GetSecurityProfilesAsync();
                 var existingProf = allProfs.FirstOrDefault(p => p.Id == id);
 
@@ -2524,6 +2536,47 @@ public class WireGuardPeersForm : Form
             }
         };
 
+        var bEdit = new Button
+        {
+            Text = "✎ Editar",
+            Height = 30,
+            BackColor = Color.Gray,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        bEdit.Click += async (_, _) =>
+        {
+            if (_grid.SelectedRows.Count == 0) return;
+            var row = _grid.SelectedRows[0];
+            var id = row.Cells[".id"].Value?.ToString();
+            if (id == null) return;
+
+            var ifs = await _svc.GetInterfacesAsync();
+            var ipSvc = new IpService(client);
+            var allIps = await ipSvc.GetAddressesAsync();
+            var interfaceIps = new Dictionary<string, string>();
+            foreach (var i in ifs)
+            {
+                var ipObj = allIps.FirstOrDefault(a => a.Interface == i.Name);
+                interfaceIps[i.Name] = ipObj != null ? ipObj.Address : "";
+            }
+
+            var exi = new WireGuardPeer
+            {
+                Interface = row.Cells["interface"].Value?.ToString() ?? "",
+                PublicKey = row.Cells["public-key"].Value?.ToString() ?? "",
+                AllowedAddress = row.Cells["allowed-address"].Value?.ToString() ?? "",
+                Comment = row.Cells["comment"].Value?.ToString() ?? ""
+            };
+
+            using var f = new WgPeerEditForm(ifs.Select(i => i.Name).ToList(), _client, interfaceIps, exi);
+            if (f.ShowDialog() == DialogResult.OK)
+            {
+                await _svc.UpdatePeerAsync(id, new { @interface = f.Peer.Interface, @allowed_address = f.Peer.AllowedAddress, @comment = f.Peer.Comment });
+                await LoadData();
+            }
+        };
+
         var bDel = new Button
         {
             Text = "✕ Apagar",
@@ -2564,7 +2617,7 @@ public class WireGuardPeersForm : Form
             f.ShowDialog();
         };
 
-        tbar.Controls.AddRange(new Control[] { bAdd, bDel, bExp });
+        tbar.Controls.AddRange(new Control[] { bAdd, bEdit, bDel, bExp });
 
         _grid.Dock = DockStyle.Fill;
         _grid.ReadOnly = true;
@@ -2578,6 +2631,7 @@ public class WireGuardPeersForm : Form
         _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "interface", HeaderText = "Interface" });
         _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "public-key", HeaderText = "Public Key" });
         _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "allowed-address", HeaderText = "IP Permitido" });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "comment", HeaderText = "Comentário" });
 
         Controls.Add(_grid);
         Controls.Add(tbar);
@@ -2593,7 +2647,7 @@ public class WireGuardPeersForm : Form
             _grid.Rows.Clear();
             foreach (var p in l)
             {
-                _grid.Rows.Add(p.Id, p.Interface, p.PublicKey, p.AllowedAddress);
+                _grid.Rows.Add(p.Id, p.Interface, p.PublicKey, p.AllowedAddress, p.Comment);
             }
         }
         catch { }
@@ -2648,13 +2702,13 @@ public class VpnQuickSetupForm : Form
         Controls.Add(_txtMtu);
         y += 35;
 
-        Controls.Add(new Label { Text = "Rede VPN:", Location = new Point(20, y + 3), AutoSize = true });
+        Controls.Add(new Label { Text = "Rede VPN (Ex: 10.10.10.1/24):", Location = new Point(20, y + 3), AutoSize = true });
         _txtNetwork.Location = new Point(150, y);
         _txtNetwork.Width = 200;
         Controls.Add(_txtNetwork);
         y += 35;
 
-        Controls.Add(new Label { Text = "IP Peer:", Location = new Point(20, y + 3), AutoSize = true });
+        Controls.Add(new Label { Text = "IP Peer (Ex: 10.10.10.2/32):", Location = new Point(20, y + 3), AutoSize = true });
         _txtPeerIp.Location = new Point(150, y);
         _txtPeerIp.Width = 200;
         Controls.Add(_txtPeerIp);
@@ -2726,7 +2780,7 @@ public class VpnQuickSetupForm : Form
         {
             if (!string.IsNullOrWhiteSpace(ClientPrivateKey))
             {
-                WireGuardKeyStore.Save(_txtPeerPubKey.Text, ClientPrivateKey);
+                WireGuardKeyStore.Save(client.Host, _txtPeerPubKey.Text, ClientPrivateKey);
             }
         };
 
@@ -2902,9 +2956,9 @@ public class WgPeerEditForm : Form
     private readonly ComboBox _cI = new();
     private readonly TextBox _txtEndpoint = new();
 
-    public WgPeerEditForm(List<string> ifs, MikroTikClient client, Dictionary<string, string> interfaceIps)
+    public WgPeerEditForm(List<string> ifs, MikroTikClient client, Dictionary<string, string> interfaceIps, WireGuardPeer? existing = null)
     {
-        Text = "Novo Peer (Cliente)";
+        Text = existing == null ? "Novo Peer (Cliente)" : "Editar Peer (Cliente)";
         Size = new Size(500, 420);
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -2979,7 +3033,7 @@ public class WgPeerEditForm : Form
             }
             else
             {
-                hintLbl.Text = $"💡 Indique o IP do cliente com /32.\n(A interface {selectedIf} não tem IP configurado)";
+                hintLbl.Text = $"💡 Indique o IP do cliente com /32.\n(A interface '{selectedIf}' não tem IP configurado)";
             }
         };
 
@@ -3016,9 +3070,23 @@ public class WgPeerEditForm : Form
         Controls.Add(btnDdns);
         y += 40;
 
+        if (existing != null)
+        {
+            _tNo.Text = existing.Comment;
+            _tPu.Text = existing.PublicKey;
+            _tPu.ReadOnly = true;
+            _tIp.Text = existing.AllowedAddress;
+            if (_cI.Items.Contains(existing.Interface)) _cI.SelectedItem = existing.Interface;
+            bK.Enabled = false;
+        }
+        else
+        {
+            _tIp.Text = "10.253.0.2/32";
+        }
+
         var bO = new Button
         {
-            Text = "Adicionar Peer",
+            Text = existing == null ? "Adicionar Peer" : "Guardar",
             Location = new Point(180, y),
             Width = 200,
             BackColor = Color.DodgerBlue,
@@ -3030,7 +3098,7 @@ public class WgPeerEditForm : Form
         {
             if (!string.IsNullOrWhiteSpace(GeneratedPrivateKey))
             {
-                WireGuardKeyStore.Save(_tPu.Text, GeneratedPrivateKey);
+                WireGuardKeyStore.Save(client.Host, _tPu.Text, GeneratedPrivateKey);
             }
 
             Peer = new WireGuardPeer
@@ -3063,9 +3131,9 @@ public class WgClientConfigForm : Form
         {
             Location = new Point(180, 20),
             Width = 250,
-            DataSource = ifs.Select(x => x.Name).ToList(),
             DropDownStyle = ComboBoxStyle.DropDownList
         };
+        foreach (var i in ifs) cbo.Items.Add(i.Name);
         if (sI != null && cbo.Items.Contains(sI)) cbo.SelectedItem = sI;
         else if (cbo.Items.Count > 0) cbo.SelectedIndex = 0;
 
@@ -3073,7 +3141,7 @@ public class WgClientConfigForm : Form
 
         if (peerPubKey != null)
         {
-            tK.Text = WireGuardKeyStore.GetPrivateKey(peerPubKey) ?? "";
+            tK.Text = WireGuardKeyStore.GetPrivateKey(client.Host, peerPubKey) ?? "";
         }
 
         var tE = new TextBox { Location = new Point(180, 100), Width = 250 };
