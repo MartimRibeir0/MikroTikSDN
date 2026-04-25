@@ -907,6 +907,46 @@ public class BridgePortsForm : Form
             }
         };
 
+        var btnEdit = new Button
+        {
+            Text = "✎ Editar",
+            Height = 30,
+            BackColor = Color.Gray,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+
+        btnEdit.Click += async (_, _) =>
+        {
+            if (_grid.SelectedRows.Count == 0) return;
+            var id = _grid.SelectedRows[0].Cells[".id"].Value?.ToString();
+            if (id == null) return;
+
+            try
+            {
+                var iSvc = new InterfaceService(_client);
+                var ifs = (await iSvc.GetAllAsync()).Select(i => i.Name).ToList();
+                var brs = (await _svc.GetBridgesAsync()).Select(b => b.Name).ToList();
+
+                var existing = new BridgePort
+                {
+                    Interface = _grid.SelectedRows[0].Cells["interface"].Value?.ToString() ?? "",
+                    Bridge = _grid.SelectedRows[0].Cells["bridge"].Value?.ToString() ?? ""
+                };
+
+                using var f = new BridgePortEditForm(ifs, brs, existing);
+                if (f.ShowDialog() == DialogResult.OK)
+                {
+                    await _svc.UpdatePortAsync(id, new { @interface = f.Port.Interface, bridge = f.Port.Bridge });
+                    await LoadDataAsync();
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message);
+            }
+        };
+
         var btnDel = new Button
         {
             Text = "✕ Remover",
@@ -935,7 +975,7 @@ public class BridgePortsForm : Form
             }
         };
 
-        toolbar.Controls.AddRange(new Control[] { btnAdd, btnDel });
+        toolbar.Controls.AddRange(new Control[] { btnAdd, btnEdit, btnDel });
 
         _grid.Dock = DockStyle.Fill;
         _grid.ReadOnly = true;
@@ -1052,9 +1092,9 @@ public class BridgePortEditForm : Form
     private readonly ComboBox _cboIface = new() { DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly ComboBox _cboBridge = new() { DropDownStyle = ComboBoxStyle.DropDownList };
 
-    public BridgePortEditForm(List<string> interfaces, List<string> bridges)
+    public BridgePortEditForm(List<string> interfaces, List<string> bridges, BridgePort? existing = null)
     {
-        Text = "Adicionar Porta";
+        Text = existing == null ? "Adicionar Porta" : "Editar Porta";
         Size = new Size(340, 200);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -1066,19 +1106,9 @@ public class BridgePortEditForm : Form
             _cboIface.Items.Add(i);
         }
 
-        if (_cboIface.Items.Count > 0)
-        {
-            _cboIface.SelectedIndex = 0;
-        }
-
         foreach (var b in bridges)
         {
             _cboBridge.Items.Add(b);
-        }
-
-        if (_cboBridge.Items.Count > 0)
-        {
-            _cboBridge.SelectedIndex = 0;
         }
 
         int y = 20;
@@ -1095,9 +1125,20 @@ public class BridgePortEditForm : Form
         Controls.Add(_cboBridge);
         y += 50;
 
+        if (existing != null)
+        {
+            if (_cboIface.Items.Contains(existing.Interface)) _cboIface.SelectedItem = existing.Interface;
+            if (_cboBridge.Items.Contains(existing.Bridge)) _cboBridge.SelectedItem = existing.Bridge;
+        }
+        else
+        {
+            if (_cboIface.Items.Count > 0) _cboIface.SelectedIndex = 0;
+            if (_cboBridge.Items.Count > 0) _cboBridge.SelectedIndex = 0;
+        }
+
         var ok = new Button
         {
-            Text = "Adicionar",
+            Text = "Guardar",
             Location = new Point(130, y),
             Size = new Size(170, 30),
             BackColor = Color.SeaGreen,
@@ -1139,12 +1180,12 @@ public class IpPanel : BasePanel
         _svc = new IpService(client);
 
         AddToolbarButton("＋ Adicionar", Color.DodgerBlue).Click += BtnAdd_Click;
+        AddToolbarButton("✎ Editar", Color.Gray).Click += BtnEdit_Click;
         AddToolbarButton("✕ Apagar", Color.Firebrick).Click += async (_, _) => await DeleteAsync();
         AddToolbarButton("↺ Atualizar", Color.FromArgb(0, 100, 180)).Click += async (_, _) => await LoadDataAsync();
 
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", Visible = false });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "address", HeaderText = "Endereço" });
-        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "network", HeaderText = "Rede" });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "interface", HeaderText = "Interface" });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "dynamic", HeaderText = "Dinâmico" });
     }
@@ -1189,6 +1230,43 @@ public class IpPanel : BasePanel
         }
     }
 
+    private async void BtnEdit_Click(object? s, EventArgs e)
+    {
+        if (Grid.SelectedRows.Count == 0) return;
+        var row = Grid.SelectedRows[0];
+        var id = row.Cells[".id"].Value?.ToString();
+        if (id == null) return;
+
+        if (row.Cells["dynamic"].Value?.ToString() == "Sim")
+        {
+            MessageBox.Show("Endereços IP dinâmicos não podem ser editados.");
+            return;
+        }
+
+        try
+        {
+            var iSvc = new InterfaceService(Client);
+            var interfaces = (await iSvc.GetAllAsync()).Select(i => i.Name).ToList();
+
+            var existing = new IpAddress
+            {
+                Address = row.Cells["address"].Value?.ToString() ?? "",
+                Interface = row.Cells["interface"].Value?.ToString() ?? ""
+            };
+
+            using var frm = new IpAddressEditForm(interfaces, existing);
+            if (frm.ShowDialog() == DialogResult.OK)
+            {
+                await _svc.UpdateAddressAsync(id, new { address = frm.Address.Address, @interface = frm.Address.Interface, comment = frm.Address.Comment });
+                await LoadDataAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+        }
+    }
+
     private async Task DeleteAsync()
     {
         var id = SelectedId();
@@ -1215,9 +1293,9 @@ public class IpAddressEditForm : Form
     private readonly ComboBox _cboInterface = new() { DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly TextBox _txtComment = new();
 
-    public IpAddressEditForm(List<string> interfaces)
+    public IpAddressEditForm(List<string> interfaces, IpAddress? existing = null)
     {
-        Text = "Novo IP";
+        Text = existing == null ? "Novo IP" : "Editar IP";
         Size = new Size(340, 210);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterParent;
@@ -1252,6 +1330,13 @@ public class IpAddressEditForm : Form
         _txtComment.Width = 185;
         Controls.Add(_txtComment);
         y += 38;
+
+        if (existing != null)
+        {
+            _txtAddress.Text = existing.Address;
+            if (_cboInterface.Items.Contains(existing.Interface)) _cboInterface.SelectedItem = existing.Interface;
+            _txtComment.Text = existing.Comment;
+        }
 
         var ok = new Button
         {
@@ -1292,13 +1377,17 @@ public class RoutesPanel : BasePanel
         _svc = new RoutingService(client);
 
         AddToolbarButton("＋ Nova Rota", Color.DodgerBlue).Click += BtnAdd_Click;
+        AddToolbarButton("✎ Editar", Color.Gray).Click += BtnEdit_Click;
         AddToolbarButton("✕ Apagar", Color.Firebrick).Click += async (_, _) => await DeleteAsync();
+        AddToolbarButton("✔ Ativar", Color.SeaGreen).Click += async (_, _) => await ToggleAsync(true);
+        AddToolbarButton("✕ Desativar", Color.Chocolate).Click += async (_, _) => await ToggleAsync(false);
         AddToolbarButton("↺ Atualizar", Color.FromArgb(0, 100, 180)).Click += async (_, _) => await LoadDataAsync();
 
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", Visible = false });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "dst", HeaderText = "Destino" });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "gw", HeaderText = "Gateway" });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "dist", HeaderText = "Distância" });
+        Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "active", HeaderText = "Ativa" });
     }
 
     protected override async Task LoadDataAsync()
@@ -1309,7 +1398,7 @@ public class RoutesPanel : BasePanel
             Grid.Rows.Clear();
             foreach (var r in list)
             {
-                Grid.Rows.Add(r.Id, r.DstAddress, r.Gateway, r.Distance);
+                Grid.Rows.Add(r.Id, r.DstAddress, r.Gateway, r.Distance, r.Active ? "Sim" : "Não");
             }
         }
         catch { }
@@ -1323,6 +1412,34 @@ public class RoutesPanel : BasePanel
             try
             {
                 await _svc.AddRouteAsync(frm.Route);
+                await LoadDataAsync();
+            }
+            catch (Exception ex)
+            {
+                ShowError(ex);
+            }
+        }
+    }
+
+    private async void BtnEdit_Click(object? s, EventArgs e)
+    {
+        if (Grid.SelectedRows.Count == 0) return;
+        var row = Grid.SelectedRows[0];
+        var id = row.Cells[".id"].Value?.ToString();
+        if (id == null) return;
+
+        var existing = new StaticRoute
+        {
+            DstAddress = row.Cells["dst"].Value?.ToString() ?? "",
+            Gateway = row.Cells["gw"].Value?.ToString() ?? ""
+        };
+
+        using var frm = new RouteEditForm(existing);
+        if (frm.ShowDialog() == DialogResult.OK)
+        {
+            try
+            {
+                await _svc.UpdateRouteAsync(id, new { @dst_address = frm.Route.DstAddress, gateway = frm.Route.Gateway });
                 await LoadDataAsync();
             }
             catch (Exception ex)
@@ -1348,6 +1465,23 @@ public class RoutesPanel : BasePanel
             }
         }
     }
+
+    private async Task ToggleAsync(bool enable)
+    {
+        var id = SelectedId();
+        if (id == null) return;
+
+        try
+        {
+            if (enable) await _svc.EnableRouteAsync(id);
+            else await _svc.DisableRouteAsync(id);
+            await LoadDataAsync();
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+        }
+    }
 }
 
 public class RouteEditForm : Form
@@ -1357,9 +1491,9 @@ public class RouteEditForm : Form
     private readonly TextBox _txtDst = new();
     private readonly TextBox _txtGw = new();
 
-    public RouteEditForm()
+    public RouteEditForm(StaticRoute? existing = null)
     {
-        Text = "Nova Rota";
+        Text = existing == null ? "Nova Rota" : "Editar Rota";
         Size = new Size(340, 180);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterParent;
@@ -1374,6 +1508,12 @@ public class RouteEditForm : Form
         _txtGw.Location = new Point(100, 60);
         _txtGw.Width = 200;
         Controls.Add(_txtGw);
+
+        if (existing != null)
+        {
+            _txtDst.Text = existing.DstAddress;
+            _txtGw.Text = existing.Gateway;
+        }
 
         var ok = new Button
         {
@@ -1401,7 +1541,7 @@ public class RouteEditForm : Form
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  DHCP PANEL (Agora com 3 Abas e Edição de Redes)
+//  DHCP PANEL
 // ════════════════════════════════════════════════════════════════════
 
 public class DhcpPanel : BasePanel
@@ -1460,7 +1600,6 @@ public class DhcpPanel : BasePanel
 
         AddToolbarButton("↺ Atualizar", Color.FromArgb(0, 100, 180)).Click += async (_, _) => await LoadDataAsync();
 
-        // Colunas Servidores
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", Visible = false });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "name", HeaderText = "Nome", FillWeight = 25 });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "interface", HeaderText = "Interface", FillWeight = 25 });
@@ -1468,12 +1607,10 @@ public class DhcpPanel : BasePanel
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "lease-time", HeaderText = "Lease Time", FillWeight = 15 });
         Grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "disabled", HeaderText = "Disabled", FillWeight = 15 });
 
-        // Colunas Pools
         _gridPools.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", Visible = false });
         _gridPools.Columns.Add(new DataGridViewTextBoxColumn { Name = "name", HeaderText = "Nome", FillWeight = 30 });
         _gridPools.Columns.Add(new DataGridViewTextBoxColumn { Name = "ranges", HeaderText = "Ranges", FillWeight = 70 });
 
-        // Colunas Networks
         _gridNetworks.Columns.Add(new DataGridViewTextBoxColumn { Name = ".id", Visible = false });
         _gridNetworks.Columns.Add(new DataGridViewTextBoxColumn { Name = "address", HeaderText = "Rede (Address)", FillWeight = 25 });
         _gridNetworks.Columns.Add(new DataGridViewTextBoxColumn { Name = "gateway", HeaderText = "Gateway", FillWeight = 25 });
@@ -1507,8 +1644,6 @@ public class DhcpPanel : BasePanel
 
         _btnEnable.Visible = isServer;
         _btnDisable.Visible = isServer;
-
-        // Não temos endpoint de edição (Update) para Pools no MikroTik de forma simples, mas para Servers e Networks sim
         _btnEdit.Visible = !isPool;
 
         await LoadDataAsync();
@@ -1799,51 +1934,24 @@ public class DhcpServerEditForm : Form
         MaximizeBox = false;
         Font = new Font("Segoe UI", 9.5f);
 
-        foreach (var p in pools)
-        {
-            _cboPool.Items.Add(p.Name);
-        }
+        foreach (var p in pools) _cboPool.Items.Add(p.Name);
+        if (_cboPool.Items.Count > 0) _cboPool.SelectedIndex = 0;
 
-        if (_cboPool.Items.Count > 0)
-        {
-            _cboPool.SelectedIndex = 0;
-        }
-
-        foreach (var i in interfaces)
-        {
-            _cboIface.Items.Add(i);
-        }
-
-        if (_cboIface.Items.Count > 0)
-        {
-            _cboIface.SelectedIndex = 0;
-        }
+        foreach (var i in interfaces) _cboIface.Items.Add(i);
+        if (_cboIface.Items.Count > 0) _cboIface.SelectedIndex = 0;
 
         int y = 18;
-
         Controls.Add(new Label { Text = "Nome:", Location = new Point(14, y + 3), AutoSize = true });
-        _txtName.Location = new Point(120, y);
-        _txtName.Width = 185;
-        Controls.Add(_txtName);
-        y += 38;
+        _txtName.Location = new Point(120, y); _txtName.Width = 185; Controls.Add(_txtName); y += 38;
 
         Controls.Add(new Label { Text = "Interface:", Location = new Point(14, y + 3), AutoSize = true });
-        _cboIface.Location = new Point(120, y);
-        _cboIface.Width = 185;
-        Controls.Add(_cboIface);
-        y += 38;
+        _cboIface.Location = new Point(120, y); _cboIface.Width = 185; Controls.Add(_cboIface); y += 38;
 
         Controls.Add(new Label { Text = "Pool:", Location = new Point(14, y + 3), AutoSize = true });
-        _cboPool.Location = new Point(120, y);
-        _cboPool.Width = 185;
-        Controls.Add(_cboPool);
-        y += 38;
+        _cboPool.Location = new Point(120, y); _cboPool.Width = 185; Controls.Add(_cboPool); y += 38;
 
         Controls.Add(new Label { Text = "Lease Time:", Location = new Point(14, y + 3), AutoSize = true });
-        _txtLease.Location = new Point(120, y);
-        _txtLease.Width = 185;
-        Controls.Add(_txtLease);
-        y += 38;
+        _txtLease.Location = new Point(120, y); _txtLease.Width = 185; Controls.Add(_txtLease); y += 38;
 
         if (existing != null)
         {
@@ -1895,7 +2003,6 @@ public class DhcpServerEditForm : Form
 public class DhcpPoolEditForm : Form
 {
     public DhcpPool Pool { get; private set; } = new();
-
     private readonly TextBox _txtName = new();
     private readonly TextBox _txtRanges = new();
 
@@ -1909,18 +2016,11 @@ public class DhcpPoolEditForm : Form
         Font = new Font("Segoe UI", 9.5f);
 
         int y = 18;
-
         Controls.Add(new Label { Text = "Nome:", Location = new Point(14, y + 3), AutoSize = true });
-        _txtName.Location = new Point(100, y);
-        _txtName.Width = 200;
-        Controls.Add(_txtName);
-        y += 38;
+        _txtName.Location = new Point(100, y); _txtName.Width = 200; Controls.Add(_txtName); y += 38;
 
         Controls.Add(new Label { Text = "Ranges:", Location = new Point(14, y + 3), AutoSize = true });
-        _txtRanges.Location = new Point(100, y);
-        _txtRanges.Width = 200;
-        Controls.Add(_txtRanges);
-        y += 38;
+        _txtRanges.Location = new Point(100, y); _txtRanges.Width = 200; Controls.Add(_txtRanges); y += 38;
 
         var btn = new Button
         {
@@ -1941,11 +2041,7 @@ public class DhcpPoolEditForm : Form
                 return;
             }
 
-            Pool = new DhcpPool
-            {
-                Name = _txtName.Text.Trim(),
-                Ranges = _txtRanges.Text.Trim()
-            };
+            Pool = new DhcpPool { Name = _txtName.Text.Trim(), Ranges = _txtRanges.Text.Trim() };
             DialogResult = DialogResult.OK;
             Close();
         };
@@ -1958,7 +2054,6 @@ public class DhcpPoolEditForm : Form
 public class DhcpNetworkEditForm : Form
 {
     public DhcpNetwork Network { get; private set; } = new();
-
     private readonly TextBox _txtAddress = new();
     private readonly TextBox _txtGateway = new();
     private readonly TextBox _txtDns = new();
@@ -1974,30 +2069,17 @@ public class DhcpNetworkEditForm : Form
         Font = new Font("Segoe UI", 9.5f);
 
         int y = 18;
-
         Controls.Add(new Label { Text = "Rede (CIDR):", Location = new Point(14, y + 3), AutoSize = true });
-        _txtAddress.Location = new Point(120, y);
-        _txtAddress.Width = 200;
-        Controls.Add(_txtAddress);
-        y += 38;
+        _txtAddress.Location = new Point(120, y); _txtAddress.Width = 200; Controls.Add(_txtAddress); y += 38;
 
         Controls.Add(new Label { Text = "Gateway:", Location = new Point(14, y + 3), AutoSize = true });
-        _txtGateway.Location = new Point(120, y);
-        _txtGateway.Width = 200;
-        Controls.Add(_txtGateway);
-        y += 38;
+        _txtGateway.Location = new Point(120, y); _txtGateway.Width = 200; Controls.Add(_txtGateway); y += 38;
 
         Controls.Add(new Label { Text = "Servidor DNS:", Location = new Point(14, y + 3), AutoSize = true });
-        _txtDns.Location = new Point(120, y);
-        _txtDns.Width = 200;
-        Controls.Add(_txtDns);
-        y += 38;
+        _txtDns.Location = new Point(120, y); _txtDns.Width = 200; Controls.Add(_txtDns); y += 38;
 
         Controls.Add(new Label { Text = "Comentário:", Location = new Point(14, y + 3), AutoSize = true });
-        _txtComment.Location = new Point(120, y);
-        _txtComment.Width = 200;
-        Controls.Add(_txtComment);
-        y += 38;
+        _txtComment.Location = new Point(120, y); _txtComment.Width = 200; Controls.Add(_txtComment); y += 38;
 
         if (existing != null)
         {
@@ -2400,7 +2482,7 @@ public class WireGuardPanel : BasePanel
             }
         };
 
-        AddToolbarButton("＋ Nova Interface", Color.FromArgb(0, 120, 215)).Click += async (_, _) =>
+        AddToolbarButton("＋ Nova", Color.DodgerBlue).Click += async (_, _) =>
         {
             using var frm = new WgInterfaceEditForm();
             if (frm.ShowDialog() == DialogResult.OK)
@@ -2433,7 +2515,29 @@ public class WireGuardPanel : BasePanel
             }
         };
 
-        AddToolbarButton("✕ Apagar Interface", Color.FromArgb(180, 30, 30)).Click += async (_, _) =>
+        AddToolbarButton("✎ Editar", Color.Gray).Click += async (_, _) =>
+        {
+            if (Grid.SelectedRows.Count == 0) return;
+            var id = Grid.SelectedRows[0].Cells[".id"].Value?.ToString();
+            var existing = new WireGuardInterface
+            {
+                Name = Grid.SelectedRows[0].Cells["name"].Value?.ToString() ?? "",
+                ListenPort = Grid.SelectedRows[0].Cells["port"].Value?.ToString() ?? ""
+            };
+
+            using var frm = new WgInterfaceEditForm(existing);
+            if (frm.ShowDialog() == DialogResult.OK)
+            {
+                try
+                {
+                    await _svc.UpdateInterfaceAsync(id!, new { listen_port = frm.WgInterface.ListenPort });
+                    await LoadDataAsync();
+                }
+                catch (Exception ex) { ShowError(ex); }
+            }
+        };
+
+        AddToolbarButton("✕ Apagar", Color.Firebrick).Click += async (_, _) =>
         {
             var id = SelectedId();
             if (id == null) return;
@@ -2444,7 +2548,7 @@ public class WireGuardPanel : BasePanel
             }
         };
 
-        AddToolbarButton("👤 Gerir Peers (Clientes)", Color.SeaGreen).Click += async (_, _) =>
+        AddToolbarButton("👤 Gerir Peers", Color.SeaGreen).Click += async (_, _) =>
         {
             using var frm = new WireGuardPeersForm(_svc, Client);
             frm.ShowDialog();
@@ -2501,7 +2605,7 @@ public class WireGuardPeersForm : Form
 
         var bAdd = new Button
         {
-            Text = "＋ Novo Peer",
+            Text = "＋ Novo",
             Height = 30,
             BackColor = Color.DodgerBlue,
             ForeColor = Color.White,
@@ -2869,10 +2973,10 @@ public class WgInterfaceEditForm : Form
     private readonly TextBox _txtNetwork = new();
     private readonly TextBox _txtComment = new();
 
-    public WgInterfaceEditForm()
+    public WgInterfaceEditForm(WireGuardInterface? existing = null)
     {
-        Text = "Nova Interface";
-        Size = new Size(340, 290);
+        Text = existing == null ? "Nova Interface" : "Editar Interface";
+        Size = new Size(340, existing == null ? 290 : 160);
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -2893,28 +2997,37 @@ public class WgInterfaceEditForm : Form
         Controls.Add(_txtPort);
         y += 38;
 
-        Controls.Add(new Label { Text = "Rede (CIDR):", Location = new Point(20, y + 3), AutoSize = true });
-        _txtNetwork.Location = new Point(120, y);
-        _txtNetwork.Width = 185;
-        Controls.Add(_txtNetwork);
-        y += 24;
+        if (existing != null)
+        {
+            _txtName.Text = existing.Name;
+            _txtName.Enabled = false;
+            _txtPort.Text = existing.ListenPort;
+        }
+        else
+        {
+            Controls.Add(new Label { Text = "Rede (CIDR):", Location = new Point(20, y + 3), AutoSize = true });
+            _txtNetwork.Location = new Point(120, y);
+            _txtNetwork.Width = 185;
+            Controls.Add(_txtNetwork);
+            y += 24;
 
-        var hint = new Label { Text = "Ex: 10.253.0.1/24 (Cria IP e regra NAT)", Location = new Point(120, y), AutoSize = true, ForeColor = Color.Gray, Font = new Font("Segoe UI", 8f) };
-        Controls.Add(hint);
-        y += 22;
+            var hint = new Label { Text = "Ex: 10.253.0.1/24 (Cria IP e regra NAT)", Location = new Point(120, y), AutoSize = true, ForeColor = Color.Gray, Font = new Font("Segoe UI", 8f) };
+            Controls.Add(hint);
+            y += 22;
 
-        Controls.Add(new Label { Text = "Comentário:", Location = new Point(20, y + 3), AutoSize = true });
-        _txtComment.Location = new Point(120, y);
-        _txtComment.Width = 185;
-        Controls.Add(_txtComment);
-        y += 38;
+            Controls.Add(new Label { Text = "Comentário:", Location = new Point(20, y + 3), AutoSize = true });
+            _txtComment.Location = new Point(120, y);
+            _txtComment.Width = 185;
+            Controls.Add(_txtComment);
+            y += 38;
+        }
 
         var b = new Button
         {
-            Text = "Criar Interface",
+            Text = existing == null ? "Criar Interface" : "Guardar",
             Location = new Point(120, y),
             Size = new Size(185, 30),
-            BackColor = Color.FromArgb(0, 120, 215),
+            BackColor = Color.DodgerBlue,
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat
         };
